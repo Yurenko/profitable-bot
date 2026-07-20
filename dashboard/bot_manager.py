@@ -62,6 +62,37 @@ class BotManager:
         self._history_download = HistoryDownloadSnapshot()
         self._stop_event = threading.Event()
 
+    def _persist_bot_intent(self, *, active: bool, mode: str | None) -> None:
+        """Persist desired bot state so it can auto-resume after serverless cold start.
+
+        Vercel may stop in-memory background threads between page visits.
+        We store an "intent" flag in SQLite so next request can restart the bot.
+        """
+        try:
+            cfg = load_config(self.config_path)
+            store = create_store(cfg)
+            store.set_kv("bot_active", bool(active))
+            if mode is not None:
+                store.set_kv("bot_mode", mode)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def ensure_started(self, *, default_mode: str = "paper") -> None:
+        """Auto-start bot if persisted intent says it should be running."""
+        if self.is_running():
+            return
+        try:
+            cfg = load_config(self.config_path)
+            store = create_store(cfg)
+            active = bool(store.get_kv("bot_active", False))
+            mode = store.get_kv("bot_mode", default_mode)
+            if not active or not mode:
+                return
+            # start() acquires _lock internally; don't call it while holding _lock here
+            self.start(str(mode), mainnet_ok=False)
+        except Exception:  # noqa: BLE001
+            return
+
     def is_running(self) -> bool:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
@@ -91,6 +122,8 @@ class BotManager:
             self._last_error = None
             self._tick_count = 0
             self._stop_event.clear()
+            # Persist "desired state" so we can resume after page/tab is closed.
+            self._persist_bot_intent(active=True, mode=mode)
 
             def _loop() -> None:
                 interval = float(cfg.loop.get("poll_interval_sec", 5))
@@ -133,6 +166,11 @@ class BotManager:
         with self._lock:
             if not self.is_running() or self._bot is None:
                 return {"ok": True, "message": "Бот не запущений"}
+            # Persist intent before stopping the in-memory thread.
+            try:
+                self._persist_bot_intent(active=False, mode=self._mode)
+            except Exception:  # noqa: BLE001
+                pass
             self._bot._running = False
             self._stop_event.set()
         if self._thread:
@@ -365,6 +403,9 @@ class BotManager:
         threading.Thread(target=_job, name="history-download", daemon=True).start()
 
     def get_status(self) -> dict[str, Any]:
+        # Vercel may suspend in-memory background threads between page visits.
+        # Auto-resume from persisted intent so UI doesn't show "stopped" after reopen.
+        self.ensure_started(default_mode="paper")
         cfg = load_config(self.config_path)
         store = create_store(cfg)
         positions = store.load_positions()
