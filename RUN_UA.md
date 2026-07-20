@@ -235,4 +235,19 @@ bot-1/
 - Починайте з мінімального капіталу  
 - Торгівля криптою = високий ризик втрат
 
+---
+
+## 9. Запуск 24/7 (без вкладки браузера)
+
+**Vercel не підходить** для постійної торгівлі: процес «засинає», файли в `/tmp` стираються.
+
+Для роботи **цілодобово** (входи, DCA, TP, оновлення цін):
+
+1. VPS (Oracle Cloud Free) або свій ПК
+2. `python main.py paper` через **systemd** (не через кнопку в dashboard)
+3. Стан уже в **SQLite**: `data/bot_state.sqlite` + `logs/audit.jsonl`
+
+Покрокова інструкція: **[deploy/DEPLOY_24_7_UA.md](deploy/DEPLOY_24_7_UA.md)**  
+Деплой на **AWS EC2**: **[deploy/DEPLOY_AWS_UA.md](deploy/DEPLOY_AWS_UA.md)**
+
 Повна документація англійською: [README.md](README.md)

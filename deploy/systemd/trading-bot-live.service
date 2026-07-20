@@ -1,0 +1,21 @@
+[Unit]
+Description=MRDCA trading bot (live mode — testnet first!)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/profitable-bot
+Environment=PATH=/home/ubuntu/profitable-bot/.venv/bin:/usr/bin
+EnvironmentFile=-/home/ubuntu/profitable-bot/.env
+# Mainnet requires --i-understand-mainnet-risk in config testnet: false
+ExecStart=/home/ubuntu/profitable-bot/.venv/bin/python main.py live
+Restart=always
+RestartSec=15
+StandardOutput=append:/home/ubuntu/profitable-bot/logs/systemd-live.log
+StandardError=append:/home/ubuntu/profitable-bot/logs/systemd-live.log
+
+[Install]
+WantedBy=multi-user.target

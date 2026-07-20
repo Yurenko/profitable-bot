@@ -1,0 +1,17 @@
+[Unit]
+Description=MRDCA dashboard (read-only UI; bot runs in trading-bot-paper.service)
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/profitable-bot
+Environment=PATH=/home/ubuntu/profitable-bot/.venv/bin:/usr/bin
+EnvironmentFile=-/home/ubuntu/profitable-bot/.env
+ExecStart=/home/ubuntu/profitable-bot/.venv/bin/python main.py dashboard --host 0.0.0.0 --port 8080 --no-browser
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
