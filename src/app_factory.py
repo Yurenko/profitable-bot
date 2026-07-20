@@ -7,9 +7,14 @@ from src.exchange.ccxt_client import CCXTExchange
 from src.exchange.paper import PaperExchange
 from src.news.calendar import EconomicCalendar
 from src.state.store import StateStore
+from src.runtime_env import is_vercel
 
 
 def create_store(cfg: AppConfig) -> StateStore:
+    # Vercel filesystem is read-only except /tmp.
+    if is_vercel():
+        return StateStore("/tmp/bot_state.sqlite", "/tmp/audit.jsonl")
+
     return StateStore(
         cfg.persistence.get("db_path", "data/bot_state.sqlite"),
         cfg.persistence.get("audit_log_path", "logs/audit.jsonl"),

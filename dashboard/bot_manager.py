@@ -16,6 +16,7 @@ from src.config_io import save_config_patch
 from src.logging_setup import setup_logging
 from src.risk_manager import RiskManager
 from src.strategy import MeanReversionDCAStrategy
+from src.runtime_env import is_vercel
 
 logger = logging.getLogger(__name__)
 
@@ -413,7 +414,10 @@ class BotManager:
 
     def read_audit(self, limit: int = 80) -> list[dict[str, Any]]:
         cfg = load_config(self.config_path)
-        path = Path(cfg.persistence.get("audit_log_path", "logs/audit.jsonl"))
+        audit_log_path = cfg.persistence.get("audit_log_path", "logs/audit.jsonl")
+        if is_vercel():
+            audit_log_path = "/tmp/audit.jsonl"
+        path = Path(audit_log_path)
         if not path.exists():
             return []
         lines = path.read_text(encoding="utf-8").strip().splitlines()
@@ -427,7 +431,11 @@ class BotManager:
 
     def read_logs(self, limit: int = 60) -> list[str]:
         cfg = load_config(self.config_path)
-        path = Path(cfg.logging.get("file", "logs/bot.log"))
+        log_path = cfg.logging.get("file", "logs/bot.log")
+        if is_vercel():
+            # Keep only the filename, Vercel writes to /tmp/<name>.
+            log_path = "/tmp/" + Path(log_path).name
+        path = Path(log_path)
         if not path.exists():
             return []
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()

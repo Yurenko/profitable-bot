@@ -9,6 +9,7 @@ from typing import Any
 
 from src.config import NewsConfig
 from src.filters import check_news_blackout
+from src.runtime_env import is_vercel
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,11 @@ SAMPLE_EVENTS: list[dict[str, Any]] = [
 
 class EconomicCalendar:
     def __init__(self, cfg: NewsConfig) -> None:
+        if is_vercel():
+            # Vercel filesystem is often read-only except /tmp.
+            cfg = NewsConfig(
+                **{**cfg.__dict__, "cache_path": "/tmp/economic_calendar.json"}
+            )
         self.cfg = cfg
         self._events: list[dict[str, Any]] = []
         self.load()

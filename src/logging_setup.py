@@ -26,7 +26,12 @@ def setup_logging(cfg: dict[str, Any] | None = None) -> None:
     log_file = cfg.get("file")
     if log_file:
         path = Path(log_file)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # On Vercel the filesystem is often read-only except /tmp.
+            path = Path("/tmp") / path.name
+            path.parent.mkdir(parents=True, exist_ok=True)
         fh = logging.FileHandler(path, encoding="utf-8")
         fh.setFormatter(fmt)
         root.addHandler(fh)
