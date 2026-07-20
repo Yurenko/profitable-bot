@@ -11,7 +11,12 @@ from typing import Any
 import pandas as pd
 
 from src.config import AppConfig
-from src.filters import MarketSnapshot, returns_from_closes, would_breach_correlation
+from src.filters import (
+    MarketSnapshot,
+    check_max_open_positions,
+    returns_from_closes,
+    would_breach_correlation,
+)
 from src.indicators import enrich_ohlcv
 from src.news.calendar import EconomicCalendar
 from src.position import Position
@@ -250,8 +255,10 @@ class TradingBot:
 
         blackout, news_reason = self.calendar.is_blackout(snap.timestamp)
         open_syms = [s for s, p in self.positions.items() if p.is_open and s != symbol]
-        corr_ok, corr_reason = True, ""
-        if self._close_prices and len(self._close_prices) >= 2:
+        # Hard cap: if another coin already has a position — no new entries
+        slot = check_max_open_positions(open_syms, self.cfg.risk.max_open_positions)
+        corr_ok, corr_reason = slot.allowed, ";".join(slot.reasons)
+        if corr_ok and self._close_prices and len(self._close_prices) >= 2:
             rets = returns_from_closes(
                 self._close_prices, self.cfg.risk.correlation_lookback
             )

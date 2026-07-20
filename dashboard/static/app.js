@@ -280,6 +280,7 @@ async function loadConfig() {
     partial_close_pct: s.partial_close_pct,
     max_daily_loss_pct: r.max_daily_loss_pct,
     circuit_breaker_drawdown_pct: r.circuit_breaker_drawdown_pct,
+    max_open_positions: r.max_open_positions,
     min_adverse_move_pct: r.min_adverse_move_pct,
     taker_fee: r.taker_fee,
     poll_interval_sec: cfg.loop?.poll_interval_sec,
@@ -335,6 +336,7 @@ async function saveConfig() {
     risk: {
       max_daily_loss_pct: +get("max_daily_loss_pct").value,
       circuit_breaker_drawdown_pct: +get("circuit_breaker_drawdown_pct").value,
+      max_open_positions: +get("max_open_positions").value,
       min_adverse_move_pct: +get("min_adverse_move_pct").value,
       taker_fee: +get("taker_fee").value,
     },

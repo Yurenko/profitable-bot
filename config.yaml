@@ -57,6 +57,7 @@ risk:
   margin_topup_buffer_pct: 0.03
   max_daily_loss_pct: 1
   circuit_breaker_drawdown_pct: 1
+  max_open_positions: 1
   max_correlated_positions: 2
   correlation_threshold: 0.75
   correlation_lookback: 100

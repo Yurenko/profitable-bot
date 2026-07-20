@@ -117,6 +117,24 @@ def correlation_matrix(returns: pd.DataFrame) -> pd.DataFrame:
     return returns.corr()
 
 
+def check_max_open_positions(
+    open_other_symbols: Sequence[str],
+    max_open_positions: int,
+) -> FilterResult:
+    """Reject a new entry if too many other symbols already have open positions.
+
+    Does not affect managing / DCA on an already-open position for the current symbol.
+    """
+    if max_open_positions <= 0:
+        return FilterResult.ok()
+    n = len(open_other_symbols)
+    if n >= max_open_positions:
+        return FilterResult.reject(
+            f"max_open_positions={max_open_positions} already_open={list(open_other_symbols)}"
+        )
+    return FilterResult.ok()
+
+
 def would_breach_correlation(
     candidate: str,
     open_symbols: Sequence[str],

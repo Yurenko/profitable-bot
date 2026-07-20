@@ -68,3 +68,21 @@ def test_correlation_filter():
     # Candidate A with open [B] — corr high
     fr = would_breach_correlation("A", ["B"], returns, threshold=0.9, max_correlated=1)
     assert not fr.allowed
+
+
+def test_max_open_positions_blocks_second_coin():
+    from src.filters import check_max_open_positions
+
+    # Already have SOL open — cannot enter NEAR when max=1
+    fr = check_max_open_positions(["SOL/USDT:USDT"], max_open_positions=1)
+    assert not fr.allowed
+    assert "max_open_positions" in fr.reasons[0]
+
+    # No other opens — entry allowed
+    assert check_max_open_positions([], max_open_positions=1).allowed
+
+    # Two opens already, max=2 — block third
+    fr2 = check_max_open_positions(["A", "B"], max_open_positions=2)
+    assert not fr2.allowed
+    # One open, max=2 — still ok
+    assert check_max_open_positions(["A"], max_open_positions=2).allowed

@@ -74,6 +74,8 @@ class RiskConfig:
     margin_topup_buffer_pct: float = 0.03
     max_daily_loss_pct: float = 0.03
     circuit_breaker_drawdown_pct: float = 0.10
+    # Max concurrent open positions across all symbols (1 = only one coin at a time)
+    max_open_positions: int = 1
     max_correlated_positions: int = 2
     correlation_threshold: float = 0.75
     correlation_lookback: int = 100

@@ -247,6 +247,7 @@
             <h2>Ризик</h2>
             <label>Макс. денний збиток % <input name="max_daily_loss_pct" type="number" step="0.01" /></label>
             <label>Circuit breaker DD % <input name="circuit_breaker_drawdown_pct" type="number" step="0.01" /></label>
+            <label>Макс. відкритих позицій (1 = одна монета) <input name="max_open_positions" type="number" step="1" min="1" /></label>
             <p class="hint">Після Take Profit блок знімається — Max DD лише для статистики, не зупиняє бектест назавжди. 1.0 = вимкнено.</p>
             <label>Мін. adverse move % <input name="min_adverse_move_pct" type="number" step="0.01" /></label>
             <label>Комісія taker <input name="taker_fee" type="number" step="0.0001" /></label>
