@@ -1,0 +1,96 @@
+mode: paper
+exchange:
+  id: binanceusdm
+  testnet: true
+  api_key: ${EXCHANGE_API_KEY}
+  api_secret: ${EXCHANGE_API_SECRET}
+  enable_rate_limit: true
+  default_type: swap
+symbols:
+- SOL/USDT:USDT
+- ATOM/USDT:USDT
+- NEAR/USDT:USDT
+- LINK/USDT:USDT
+- AVAX/USDT:USDT
+- DOT/USDT:USDT
+- ADA/USDT:USDT
+- INJ/USDT:USDT
+strategy:
+  leverage: 5
+  margin_mode: isolated
+  initial_equity_pct: 0.01
+  entry_margin_usdt: 0
+  max_dca_levels: 11
+  dca_min_adverse_pct: 0.005
+  dca_mode: grid
+  grid_step_pct: 0.04
+  grid_size_multiplier: 1.25
+  long_term_mode: true
+  use_stop_loss: false
+  auto_take_profit: true
+  rsi_period: 14
+  rsi_1m_entry: 30
+  rsi_5m_entry: 35
+  rsi_15m_dca: 30
+  adx_period: 14
+  adx_max: 38
+  atr_period: 14
+  atr_lookback: 100
+  atr_percentile_max: 90
+  funding_rate_max: 0.0005
+  oi_change_lookback: 12
+  oi_rise_threshold_pct: 0.03
+  tp_min_pct: 0.05
+  tp_strong_pct: 0.1
+  rsi_5m_strong_oversold: 25
+  trailing_tp_enabled: false
+  trailing_activate_pct: 0.008
+  trailing_callback_pct: 0.004
+  partial_close_enabled: false
+  partial_close_pct: 0.5
+  dynamic_sizing: true
+  atr_sizing_ref_pct: 0.005
+  min_equity_pct: 0.01
+  max_equity_pct: 0.03
+risk:
+  min_adverse_move_pct: 0.12
+  margin_topup_buffer_pct: 0.03
+  max_daily_loss_pct: 1
+  circuit_breaker_drawdown_pct: 1
+  max_correlated_positions: 2
+  correlation_threshold: 0.75
+  correlation_lookback: 100
+  taker_fee: 0.0004
+  maker_fee: 0.0002
+news:
+  enabled: false
+  blacklist_minutes_before: 15
+  blacklist_minutes_after: 15
+  impact_levels:
+  - high
+  cache_path: data/economic_calendar.json
+persistence:
+  db_path: data/bot_state.sqlite
+  audit_log_path: logs/audit.jsonl
+backtest:
+  start: '2021-01-01'
+  end: '2026-12-31'
+  initial_capital: 200
+  timeframe_primary: 1m
+  data_dir: data/historical
+  walk_forward:
+    train_days: 180
+    test_days: 60
+  monte_carlo:
+    n_simulations: 500
+    block_size: 20
+logging:
+  level: INFO
+  file: logs/bot.log
+  console: true
+loop:
+  poll_interval_sec: 2
+  use_websocket: true
+  funding_poll_sec: 60
+  oi_poll_sec: 60
+  heartbeat_sec: 60

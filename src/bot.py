@@ -1,0 +1,331 @@
+"""Live / paper trading loop."""
+from __future__ import annotations
+
+import logging
+import signal
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+import pandas as pd
+
+from src.config import AppConfig
+from src.filters import MarketSnapshot, returns_from_closes, would_breach_correlation
+from src.indicators import enrich_ohlcv
+from src.news.calendar import EconomicCalendar
+from src.position import Position
+from src.risk_manager import RiskManager
+from src.state.store import StateStore
+from src.strategy import ActionType, MeanReversionDCAStrategy
+
+logger = logging.getLogger(__name__)
+
+
+class TradingBot:
+    def __init__(
+        self,
+        cfg: AppConfig,
+        exchange: Any,
+        store: StateStore,
+        calendar: EconomicCalendar | None = None,
+    ) -> None:
+        self.cfg = cfg
+        self.exchange = exchange
+        self.store = store
+        self.calendar = calendar or EconomicCalendar(cfg.news)
+        self.risk = RiskManager(cfg.strategy, cfg.risk)
+        self.strategy = MeanReversionDCAStrategy(cfg.strategy, self.risk)
+        self.positions: dict[str, Position] = {}
+        self._running = False
+        self._close_prices: dict[str, pd.Series] = {}
+        self._oi_history: dict[str, list[float]] = {}
+
+        # Restore persistent state
+        self.positions = store.load_positions()
+        last_eq = store.last_equity(0.0)
+        if last_eq > 0:
+            self.risk.update_equity(last_eq)
+            self.risk.state.peak_equity = max(self.risk.state.peak_equity, last_eq)
+
+    def _client_order_id(self, symbol: str, action: str) -> str:
+        ts = int(time.time() * 1000)
+        safe = symbol.replace("/", "").replace(":", "")
+        return f"mrdca_{safe}_{action}_{ts}_{uuid.uuid4().hex[:8]}"
+
+    def _fetch_mtf(self, symbol: str) -> dict[str, pd.DataFrame]:
+        s = self.cfg.strategy
+        out: dict[str, pd.DataFrame] = {}
+        for tf, lim in (("1m", 200), ("5m", 200), ("15m", 200)):
+            df = self.exchange.fetch_ohlcv(symbol, timeframe=tf, limit=lim)
+            out[tf] = enrich_ohlcv(
+                df,
+                rsi_period=s.rsi_period,
+                adx_period=s.adx_period,
+                atr_period=s.atr_period,
+            )  # keyword-only indicator periods
+        return out
+
+    def build_snapshot(self, symbol: str) -> MarketSnapshot:
+        mtf = self._fetch_mtf(symbol)
+        d1, d5, d15 = mtf["1m"], mtf["5m"], mtf["15m"]
+        price = float(d1["close"].iloc[-1])
+        self._close_prices[symbol] = d1["close"]
+        funding = float(self.exchange.fetch_funding_rate(symbol))
+        oi = float(self.exchange.fetch_open_interest(symbol))
+        hist = self._oi_history.setdefault(symbol, [])
+        hist.append(oi)
+        max_oi = max(self.cfg.strategy.oi_change_lookback + 5, 50)
+        if len(hist) > max_oi:
+            del hist[: len(hist) - max_oi]
+        oi_series = pd.Series(hist) if len(hist) >= 2 else None
+        return MarketSnapshot(
+            symbol=symbol,
+            price=price,
+            rsi_1m=float(d1["rsi"].iloc[-1]),
+            rsi_5m=float(d5["rsi"].iloc[-1]),
+            rsi_15m=float(d15["rsi"].iloc[-1]),
+            adx_1m=float(d1["adx"].iloc[-1]),
+            atr_1m=float(d1["atr"].iloc[-1]),
+            atr_series_1m=d1["atr"],
+            funding_rate=funding,
+            open_interest=oi,
+            oi_series=oi_series,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+    def _equity(self) -> float:
+        if hasattr(self.exchange, "equity"):
+            return float(self.exchange.equity())
+        return float(self.exchange.fetch_free_usdt())
+
+    def _execute(self, symbol: str, action_type: ActionType, decision: Any, snap: MarketSnapshot) -> None:
+        coid = self._client_order_id(symbol, action_type.value)
+        if not self.store.register_order(
+            coid, symbol, action_type.value, {"decision": action_type.value}
+        ):
+            logger.warning("Duplicate order blocked: %s", coid)
+            return
+
+        try:
+            if action_type in (ActionType.ENTER, ActionType.DCA):
+                size = decision.size
+                assert size is not None
+                self.exchange.set_leverage(symbol, self.cfg.strategy.leverage)
+                self.exchange.set_margin_mode(symbol, self.cfg.strategy.margin_mode)
+                if hasattr(self.exchange, "set_mark"):
+                    self.exchange.set_mark(symbol, snap.price)
+                order = self.exchange.create_market_order(
+                    symbol,
+                    "buy",
+                    size.qty,
+                    params={"clientOrderId": coid, "margin": size.margin},
+                )
+                # Sync local position from paper/live
+                if hasattr(self.exchange, "account"):
+                    self.positions[symbol] = self.exchange.account.positions[symbol]
+                else:
+                    pos = self.positions.get(symbol) or Position(
+                        symbol=symbol, leverage=self.cfg.strategy.leverage
+                    )
+                    pos.add(
+                        snap.price,
+                        size.qty,
+                        size.margin,
+                        fee=size.notional * self.cfg.risk.taker_fee,
+                        is_dca=(action_type == ActionType.DCA),
+                    )
+                    self.positions[symbol] = pos
+                self.store.save_position(self.positions[symbol])
+                # After market entry — build grid of growing limit DCA levels
+                if (
+                    action_type == ActionType.ENTER
+                    and self.cfg.strategy.dca_mode == "grid"
+                    and symbol in self.positions
+                ):
+                    pos = self.positions[symbol]
+                    plan = self.strategy._attach_grid(pos, snap.price, size.qty)
+                    pos.meta["grid"]["entry_price"] = snap.price
+                    pos.meta["grid"]["base_qty"] = size.qty
+                    pos.meta["base_qty"] = size.qty
+                    pos.meta["grid_entry"] = snap.price
+                    self.store.save_position(pos)
+                    self.store.audit(
+                        "grid_planned",
+                        symbol=symbol,
+                        step_pct=plan.step_pct,
+                        size_multiplier=plan.size_multiplier,
+                        levels=[
+                            {"level": lv.level, "price": lv.price, "qty": lv.qty}
+                            for lv in plan.levels
+                        ],
+                    )
+                    # Best-effort: place real limit orders if exchange supports it
+                    if hasattr(self.exchange, "create_limit_order"):
+                        for lv in plan.levels:
+                            try:
+                                self.exchange.create_limit_order(
+                                    symbol,
+                                    "buy",
+                                    lv.qty,
+                                    lv.price,
+                                    params={"clientOrderId": self._client_order_id(symbol, f"grid{lv.level}")},
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning("Limit place failed L%s: %s", lv.level, exc)
+
+                self.store.audit(
+                    "fill_buy",
+                    symbol=symbol,
+                    action=action_type.value,
+                    order=order,
+                    avg_entry=self.positions[symbol].avg_entry,
+                )
+
+            elif action_type in (
+                ActionType.FULL_TP,
+                ActionType.TRAIL_EXIT,
+                ActionType.PARTIAL_TP,
+            ):
+                qty = decision.close_qty
+                if hasattr(self.exchange, "set_mark"):
+                    self.exchange.set_mark(symbol, snap.price)
+                order = self.exchange.create_market_order(
+                    symbol, "sell", qty, params={"clientOrderId": coid}
+                )
+                if hasattr(self.exchange, "account"):
+                    if symbol in self.exchange.account.positions:
+                        self.positions[symbol] = self.exchange.account.positions[symbol]
+                        if action_type == ActionType.PARTIAL_TP:
+                            self.positions[symbol].partial_taken = True
+                    else:
+                        self.positions.pop(symbol, None)
+                        self.store.delete_position(symbol)
+                else:
+                    pos = self.positions[symbol]
+                    pos.reduce(qty, snap.price, fee=qty * snap.price * self.cfg.risk.taker_fee)
+                    if action_type == ActionType.PARTIAL_TP and pos.is_open:
+                        pos.partial_taken = True
+                        self.store.save_position(pos)
+                    else:
+                        self.positions.pop(symbol, None)
+                        self.store.delete_position(symbol)
+                if symbol in self.positions and self.positions[symbol].is_open:
+                    self.store.save_position(self.positions[symbol])
+                self.store.audit(
+                    "fill_sell",
+                    symbol=symbol,
+                    action=action_type.value,
+                    order=order,
+                )
+                # After full TP — never permanently block the next entry due to past Max DD
+                if action_type in (ActionType.FULL_TP, ActionType.TRAIL_EXIT):
+                    if symbol not in self.positions or not self.positions[symbol].is_open:
+                        self.risk.resume_after_take_profit(self._equity())
+                        self.store.audit("risk_resume_after_tp", equity=self._equity())
+
+            elif action_type == ActionType.MARGIN_TOPUP:
+                amount = decision.margin_amount
+                self.exchange.add_margin(symbol, amount)
+                pos = self.positions.get(symbol)
+                if pos and not hasattr(self.exchange, "account"):
+                    pos.add_margin(amount)
+                elif hasattr(self.exchange, "account") and symbol in self.exchange.account.positions:
+                    self.positions[symbol] = self.exchange.account.positions[symbol]
+                if symbol in self.positions:
+                    self.store.save_position(self.positions[symbol])
+                self.store.audit("margin_topup", symbol=symbol, amount=amount)
+
+            self.store.update_order_status(coid, "filled")
+        except Exception as exc:  # noqa: BLE001
+            self.store.update_order_status(coid, "error")
+            self.store.audit("order_error", symbol=symbol, error=str(exc), coid=coid)
+            logger.exception("Order execution failed: %s", exc)
+
+    def process_symbol(self, symbol: str) -> None:
+        snap = self.build_snapshot(symbol)
+        equity = self._equity()
+        self.risk.update_equity(equity)
+        self.store.save_equity(equity)
+
+        blackout, news_reason = self.calendar.is_blackout(snap.timestamp)
+        open_syms = [s for s, p in self.positions.items() if p.is_open and s != symbol]
+        corr_ok, corr_reason = True, ""
+        if self._close_prices and len(self._close_prices) >= 2:
+            rets = returns_from_closes(
+                self._close_prices, self.cfg.risk.correlation_lookback
+            )
+            fr = would_breach_correlation(
+                symbol,
+                open_syms,
+                rets,
+                self.cfg.risk.correlation_threshold,
+                self.cfg.risk.max_correlated_positions,
+            )
+            corr_ok, corr_reason = fr.allowed, ";".join(fr.reasons)
+
+        pos = self.positions.get(symbol)
+        decision = self.strategy.decide(
+            snap,
+            pos,
+            equity,
+            news_ok=not blackout,
+            news_reason=news_reason,
+            correlation_ok=corr_ok,
+            correlation_reason=corr_reason,
+        )
+        logger.info(
+            "%s action=%s reason=%s price=%.4f rsi1=%.1f rsi5=%.1f",
+            symbol,
+            decision.action.value,
+            decision.reason,
+            snap.price,
+            snap.rsi_1m,
+            snap.rsi_5m,
+        )
+        if decision.action != ActionType.HOLD:
+            self._execute(symbol, decision.action, decision, snap)
+
+    def run_once(self) -> None:
+        for symbol in self.cfg.symbols:
+            try:
+                self.process_symbol(symbol)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Error processing %s: %s", symbol, exc)
+                self.store.audit("symbol_error", symbol=symbol, error=str(exc))
+
+    def run(self) -> None:
+        self._running = True
+
+        def _stop(signum: int, frame: Any) -> None:
+            logger.info("Signal %s received — graceful shutdown", signum)
+            self._running = False
+
+        signal.signal(signal.SIGINT, _stop)
+        try:
+            signal.signal(signal.SIGTERM, _stop)
+        except Exception:  # noqa: BLE001
+            pass  # Windows may not support SIGTERM the same way
+
+        interval = float(self.cfg.loop.get("poll_interval_sec", 5))
+        logger.info("Bot starting mode=%s symbols=%s", self.cfg.mode, self.cfg.symbols)
+        self.store.audit("bot_start", mode=self.cfg.mode, symbols=self.cfg.symbols)
+        if hasattr(self.exchange, "start"):
+            try:
+                self.exchange.start()
+                self.store.audit("ws_feed_start")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("WebSocket feed start failed (REST fallback): %s", exc)
+                self.store.audit("ws_feed_start_error", error=str(exc))
+        try:
+            while self._running:
+                self.run_once()
+                time.sleep(interval)
+        finally:
+            if hasattr(self.exchange, "stop"):
+                try:
+                    self.exchange.stop()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("exchange.stop: %s", exc)
+            self.store.audit("bot_stop")
+            logger.info("Bot stopped cleanly")
