@@ -148,16 +148,22 @@ async def api_history_files() -> list:
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
-    try:
-        while True:
+    while True:
+        try:
             payload = manager.get_status()
             payload["audit_preview"] = manager.read_audit(8)
             await ws.send_text(json.dumps(payload, default=str))
-            await asyncio.sleep(2)
-    except WebSocketDisconnect:
-        pass
-    except Exception:  # noqa: BLE001
-        pass
+        except WebSocketDisconnect:
+            break
+        except Exception as exc:  # noqa: BLE001
+            # Log but keep the socket alive — don't let one bad tick kill the stream
+            try:
+                import logging as _log
+                _log.getLogger(__name__).debug("ws tick error: %s", exc)
+                await ws.send_text(json.dumps({"error": str(exc)}, default=str))
+            except Exception:
+                break
+        await asyncio.sleep(2)
 
 
 def run_dashboard(host: str = "127.0.0.1", port: int = 8080, open_browser: bool = True) -> None:

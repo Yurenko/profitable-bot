@@ -195,6 +195,16 @@ class BotManager:
                 self._bot.cfg = cfg
                 self._bot.risk = RiskManager(cfg.strategy, cfg.risk)
                 self._bot.strategy = MeanReversionDCAStrategy(cfg.strategy, self._bot.risk)
+                # Drop positions for symbols removed from config (memory + SQLite)
+                active = set(cfg.symbols)
+                for sym in list(self._bot.positions.keys()):
+                    if sym not in active:
+                        logger.info(
+                            "Config change: dropping position for %s (not in symbols)", sym
+                        )
+                        self._bot.store.audit("position_dropped_config_change", symbol=sym)
+                        self._bot.store.delete_position(sym)
+                        self._bot.positions.pop(sym, None)
         return cfg
 
     def reset_equity_to_deposit(self) -> dict[str, Any]:
@@ -425,10 +435,11 @@ class BotManager:
             store.clear_equity_history()
             store.save_equity(equity)
             store.audit("equity_sanitized", previous=raw_equity, equity=equity)
+        active_symbols = set(cfg.symbols)
         positions = store.load_positions()
         pos_list = []
         for sym, p in positions.items():
-            if p.is_open:
+            if p.is_open and sym in active_symbols:
                 pos_list.append(
                     {
                         "symbol": sym,

@@ -46,8 +46,18 @@ class TradingBot:
         self._close_prices: dict[str, pd.Series] = {}
         self._oi_history: dict[str, list[float]] = {}
 
-        # Restore persistent state
-        self.positions = store.load_positions()
+        # Restore persistent state, but drop positions for symbols no longer in config
+        all_positions = store.load_positions()
+        active_symbols = set(cfg.symbols)
+        for sym in list(all_positions.keys()):
+            if sym not in active_symbols:
+                logger.warning(
+                    "Dropping restored position for %s — not in current symbol list", sym
+                )
+                store.audit("position_dropped_not_in_symbols", symbol=sym)
+                store.delete_position(sym)
+                all_positions.pop(sym)
+        self.positions = all_positions
         last_eq = store.last_equity(0.0)
         if last_eq > 0:
             self.risk.update_equity(last_eq)
@@ -332,6 +342,9 @@ class TradingBot:
         self.risk.update_equity(equity)
 
         blackout, news_reason = self.calendar.is_blackout(snap.timestamp)
+        # Count ALL open positions (including current symbol) to enforce the hard cap.
+        # This correctly handles the case where another symbol was entered earlier in the
+        # same run_once() cycle — self.positions is updated immediately after each fill.
         open_syms = [s for s, p in self.positions.items() if p.is_open and s != symbol]
         # Hard cap: if another coin already has a position — no new entries
         slot = check_max_open_positions(open_syms, self.cfg.risk.max_open_positions)
