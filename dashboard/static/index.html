@@ -115,7 +115,33 @@
       <!-- TRADES -->
       <section class="tab" id="tab-trades">
         <div class="card">
-          <div class="card-head"><h2>Аудит угод</h2></div>
+          <div class="card-head">
+            <h2>Історія угод</h2>
+            <button class="btn btn-ghost" type="button" id="btnRefreshTrades">Оновити</button>
+          </div>
+          <p class="hint">Відкриття (enter / DCA) і закриття (TP) з ціною, кількістю та PnL. Час — Europe/Kyiv.</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Час</th>
+                  <th>Монета</th>
+                  <th>Тип</th>
+                  <th>Ціна</th>
+                  <th>К-сть</th>
+                  <th>Сума</th>
+                  <th>Avg entry</th>
+                  <th>PnL</th>
+                </tr>
+              </thead>
+              <tbody id="tradesBody">
+                <tr><td colspan="8" style="color:var(--muted)">Поки немає угод</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Аудит (системні події)</h2></div>
           <div class="log-list" id="auditFull"></div>
         </div>
         <div class="card">

@@ -73,6 +73,23 @@ class StateStore:
                     equity REAL NOT NULL,
                     ts TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    qty REAL NOT NULL,
+                    notional REAL NOT NULL,
+                    fee REAL NOT NULL DEFAULT 0,
+                    avg_entry REAL,
+                    pnl REAL,
+                    dca_level INTEGER,
+                    mode TEXT,
+                    client_order_id TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts DESC);
                 """
             )
 
@@ -184,6 +201,57 @@ class StateStore:
     def clear_equity_history(self) -> None:
         with self._db() as conn:
             conn.execute("DELETE FROM equity_snapshots")
+
+    # --- Trade history (open / DCA / close) ---
+    def record_trade(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        action: str,
+        price: float,
+        qty: float,
+        fee: float = 0.0,
+        avg_entry: float | None = None,
+        pnl: float | None = None,
+        dca_level: int | None = None,
+        mode: str | None = None,
+        client_order_id: str | None = None,
+    ) -> None:
+        notional = float(price) * float(qty)
+        with self._db() as conn:
+            conn.execute(
+                "INSERT INTO trades("
+                "ts, symbol, side, action, price, qty, notional, fee, "
+                "avg_entry, pnl, dca_level, mode, client_order_id"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    _utcnow(),
+                    symbol,
+                    side,
+                    action,
+                    float(price),
+                    float(qty),
+                    notional,
+                    float(fee),
+                    None if avg_entry is None else float(avg_entry),
+                    None if pnl is None else float(pnl),
+                    dca_level,
+                    mode,
+                    client_order_id,
+                ),
+            )
+
+    def list_trades(self, limit: int = 100) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT id, ts, symbol, side, action, price, qty, notional, fee, "
+                "avg_entry, pnl, dca_level, mode, client_order_id "
+                "FROM trades ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # --- Audit ---
     def audit(self, event: str, **fields: Any) -> None:

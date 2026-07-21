@@ -54,12 +54,13 @@ function fmtPct(n) {
   return (v * 100).toFixed(2) + "%";
 }
 
-/** Local timezone, e.g. 21.07.2026 04:45:53 */
+/** Europe/Kyiv — e.g. 21.07.2026, 08:35:35 */
 function fmtTs(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso);
   return d.toLocaleString("uk-UA", {
+    timeZone: "Europe/Kyiv",
     day: "2-digit",
     month: "2-digit",
     year: "numeric",
@@ -75,6 +76,7 @@ function fmtTsShort(iso) {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso);
   return d.toLocaleString("uk-UA", {
+    timeZone: "Europe/Kyiv",
     day: "2-digit",
     month: "2-digit",
     hour: "2-digit",
@@ -82,6 +84,15 @@ function fmtTsShort(iso) {
     second: "2-digit",
     hour12: false,
   });
+}
+
+/** Audit row details without raw UTC `ts` (already shown via fmtTs). */
+function auditDetails(a) {
+  const copy = { ...a };
+  delete copy.ts;
+  delete copy.event;
+  const s = JSON.stringify(copy);
+  return s === "{}" ? "" : s.slice(0, 160);
 }
 
 function switchTab(name) {
@@ -93,7 +104,10 @@ function switchTab(name) {
   $("#pageTitle").textContent = TITLES[name] || name;
   $("#sidebar").classList.remove("open");
   $("#overlay").classList.remove("show");
-  if (name === "trades") loadAuditFull();
+  if (name === "trades") {
+    loadTradeHistory();
+    loadAuditFull();
+  }
   if (name === "settings") loadConfig();
 }
 
@@ -403,17 +417,59 @@ async function saveConfig() {
   toast(res.ok ? "Налаштування збережено ✓" : res.error, res.ok);
 }
 
+function tradeActionLabel(side, action) {
+  const a = String(action || "").toLowerCase();
+  if (side === "buy") {
+    if (a === "enter") return "🟢 Відкриття";
+    if (a === "dca") return "🔵 DCA";
+    return "🟢 Купівля";
+  }
+  if (a === "full_tp") return "🔴 Закриття (TP)";
+  if (a === "partial_tp") return "🟠 Часткове TP";
+  if (a === "trail_exit") return "🔴 Trailing";
+  return "🔴 Продаж";
+}
+
+async function loadTradeHistory() {
+  const rows = await api("/api/trades?limit=120");
+  const tbody = $("#tradesBody");
+  if (!tbody) return;
+  if (!Array.isArray(rows) || !rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted)">Поки немає угод — зʼявляться після enter / DCA / TP</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows
+    .map((t) => {
+      const pnl = t.pnl;
+      const pnlCls =
+        pnl == null || isNaN(pnl) ? "" : Number(pnl) >= 0 ? "positive" : "negative";
+      const pnlTxt = pnl == null || isNaN(pnl) ? "—" : fmtUsd(pnl);
+      const avg = t.avg_entry != null ? Number(t.avg_entry).toFixed(4) : "—";
+      return `<tr>
+        <td>${fmtTs(t.ts)}</td>
+        <td>${t.symbol || ""}</td>
+        <td>${tradeActionLabel(t.side, t.action)}</td>
+        <td>${Number(t.price).toFixed(4)}</td>
+        <td>${Number(t.qty).toFixed(6)}</td>
+        <td>${fmtUsd(t.notional)}</td>
+        <td>${avg}</td>
+        <td class="${pnlCls}">${pnlTxt}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
 async function loadAuditFull() {
   const rows = await api("/api/audit?limit=60");
   $("#auditFull").innerHTML = rows
     .map(
       (a) =>
-        `<div class="log-item"><span class="ts">${fmtTs(a.ts)}</span> <span class="ev">${a.event}</span> ${JSON.stringify(a).slice(0, 120)}</div>`
+        `<div class="log-item"><span class="ts">${fmtTs(a.ts)}</span> <span class="ev">${a.event}</span> ${a.symbol || ""} ${a.action || ""} ${auditDetails(a)}</div>`
     )
     .join("") || '<div class="hint">Порожньо</div>';
 
   const logs = await api("/api/logs?limit=40");
-  $("#logConsole").textContent = logs.join("\n") || "Логів немає";
+  $("#logConsole").textContent = (logs || []).join("\n") || "Логів немає";
 }
 
 function connectWs() {
@@ -498,6 +554,11 @@ $("#btnDownloadHistory").addEventListener("click", async () => {
 });
 
 $("#btnSave").addEventListener("click", saveConfig);
+
+document.getElementById("btnRefreshTrades")?.addEventListener("click", () => {
+  loadTradeHistory();
+  loadAuditFull();
+});
 
 document.getElementById("btnResetEquity")?.addEventListener("click", async () => {
   const r = await api("/api/equity/reset", { method: "POST", body: "{}" });

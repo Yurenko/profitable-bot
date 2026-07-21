@@ -481,6 +481,11 @@ class BotManager:
                 continue
         return list(reversed(out))
 
+    def list_trades(self, limit: int = 100) -> list[dict[str, Any]]:
+        cfg = load_config(self.config_path)
+        store = create_store(cfg)
+        return store.list_trades(limit=limit)
+
     def read_logs(self, limit: int = 60) -> list[str]:
         cfg = load_config(self.config_path)
         log_path = cfg.logging.get("file", "logs/bot.log")

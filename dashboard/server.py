@@ -130,6 +130,11 @@ async def api_audit(limit: int = 80) -> list:
     return manager.read_audit(limit=min(limit, 200))
 
 
+@app.get("/api/trades")
+async def api_trades(limit: int = 100) -> list:
+    return manager.list_trades(limit=min(limit, 500))
+
+
 @app.get("/api/logs")
 async def api_logs(limit: int = 60) -> list:
     return manager.read_logs(limit=min(limit, 200))

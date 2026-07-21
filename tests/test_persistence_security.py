@@ -84,3 +84,38 @@ def test_sane_equity_resets_corruption():
     assert _sane_equity(1e110, 200) == 200
     assert _sane_equity(float("nan"), 200) == 200
     assert abs(_sane_equity(250, 200) - 250) < 1e-9
+
+
+def test_trade_history_recorded(tmp_path):
+    store = StateStore(str(tmp_path / "s.sqlite"), str(tmp_path / "a.jsonl"))
+    store.record_trade(
+        symbol="SOL/USDT:USDT",
+        side="buy",
+        action="enter",
+        price=100.0,
+        qty=1.5,
+        fee=0.06,
+        avg_entry=100.0,
+        dca_level=1,
+        mode="paper",
+    )
+    store.record_trade(
+        symbol="SOL/USDT:USDT",
+        side="sell",
+        action="full_tp",
+        price=105.0,
+        qty=1.5,
+        fee=0.06,
+        avg_entry=100.0,
+        pnl=7.44,
+        dca_level=1,
+        mode="paper",
+    )
+    rows = store.list_trades(10)
+    assert len(rows) == 2
+    assert rows[0]["side"] == "sell"
+    assert rows[0]["action"] == "full_tp"
+    assert abs(rows[0]["pnl"] - 7.44) < 1e-9
+    assert rows[1]["side"] == "buy"
+    assert rows[1]["action"] == "enter"
+    assert abs(rows[1]["qty"] - 1.5) < 1e-9

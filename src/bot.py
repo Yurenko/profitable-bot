@@ -207,12 +207,34 @@ class TradingBot:
                             except Exception as exc:  # noqa: BLE001
                                 logger.warning("Limit place failed L%s: %s", lv.level, exc)
 
+                fill_price = float(order.get("price") or snap.price)
+                fill_qty = float(order.get("amount") or size.qty)
+                raw_fee = order.get("fee")
+                if isinstance(raw_fee, dict):
+                    fill_fee = float(raw_fee.get("cost") or 0.0)
+                else:
+                    fill_fee = float(raw_fee or 0.0)
+                pos_now = self.positions[symbol]
+                self.store.record_trade(
+                    symbol=symbol,
+                    side="buy",
+                    action=action_type.value,
+                    price=fill_price,
+                    qty=fill_qty,
+                    fee=fill_fee,
+                    avg_entry=pos_now.avg_entry,
+                    dca_level=pos_now.dca_level,
+                    mode=self.cfg.mode,
+                    client_order_id=coid,
+                )
                 self.store.audit(
                     "fill_buy",
                     symbol=symbol,
                     action=action_type.value,
-                    order=order,
-                    avg_entry=self.positions[symbol].avg_entry,
+                    price=fill_price,
+                    qty=fill_qty,
+                    avg_entry=pos_now.avg_entry,
+                    dca_level=pos_now.dca_level,
                 )
 
             elif action_type in (
@@ -221,11 +243,24 @@ class TradingBot:
                 ActionType.PARTIAL_TP,
             ):
                 qty = decision.close_qty
+                pos_before = self.positions.get(symbol)
+                avg_before = float(pos_before.avg_entry) if pos_before else 0.0
+                dca_before = int(pos_before.dca_level) if pos_before else None
                 if hasattr(self.exchange, "set_mark"):
                     self.exchange.set_mark(symbol, snap.price)
                 order = self.exchange.create_market_order(
                     symbol, "sell", qty, params={"clientOrderId": coid}
                 )
+                fill_price = float(order.get("price") or snap.price)
+                fill_qty = float(order.get("amount") or qty or 0.0)
+                raw_fee = order.get("fee")
+                if isinstance(raw_fee, dict):
+                    fill_fee = float(raw_fee.get("cost") or 0.0)
+                else:
+                    fill_fee = float(raw_fee or 0.0)
+                if fill_fee <= 0:
+                    fill_fee = fill_qty * fill_price * self.cfg.risk.taker_fee
+                pnl = (fill_price - avg_before) * fill_qty - fill_fee if avg_before > 0 else None
                 if hasattr(self.exchange, "account"):
                     if symbol in self.exchange.account.positions:
                         self.positions[symbol] = self.exchange.account.positions[symbol]
@@ -236,7 +271,7 @@ class TradingBot:
                         self.store.delete_position(symbol)
                 else:
                     pos = self.positions[symbol]
-                    pos.reduce(qty, snap.price, fee=qty * snap.price * self.cfg.risk.taker_fee)
+                    pos.reduce(qty, snap.price, fee=fill_fee)
                     if action_type == ActionType.PARTIAL_TP and pos.is_open:
                         pos.partial_taken = True
                         self.store.save_position(pos)
@@ -245,11 +280,27 @@ class TradingBot:
                         self.store.delete_position(symbol)
                 if symbol in self.positions and self.positions[symbol].is_open:
                     self.store.save_position(self.positions[symbol])
+                self.store.record_trade(
+                    symbol=symbol,
+                    side="sell",
+                    action=action_type.value,
+                    price=fill_price,
+                    qty=fill_qty,
+                    fee=fill_fee,
+                    avg_entry=avg_before,
+                    pnl=pnl,
+                    dca_level=dca_before,
+                    mode=self.cfg.mode,
+                    client_order_id=coid,
+                )
                 self.store.audit(
                     "fill_sell",
                     symbol=symbol,
                     action=action_type.value,
-                    order=order,
+                    price=fill_price,
+                    qty=fill_qty,
+                    avg_entry=avg_before,
+                    pnl=pnl,
                 )
                 # After full TP — never permanently block the next entry due to past Max DD
                 if action_type in (ActionType.FULL_TP, ActionType.TRAIL_EXIT):

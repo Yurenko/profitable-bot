@@ -1,16 +1,30 @@
-"""Logging setup."""
+"""Logging setup (Europe/Kyiv timestamps)."""
 from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+
+_KYIV = ZoneInfo("Europe/Kyiv")
+
+
+class KyivFormatter(logging.Formatter):
+    """Format asctime in Europe/Kyiv regardless of server TZ (AWS is usually UTC)."""
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        dt = datetime.fromtimestamp(record.created, tz=_KYIV)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def setup_logging(cfg: dict[str, Any] | None = None) -> None:
     cfg = cfg or {}
     level = getattr(logging, str(cfg.get("level", "INFO")).upper(), logging.INFO)
-    fmt = logging.Formatter(
+    fmt = KyivFormatter(
         "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
