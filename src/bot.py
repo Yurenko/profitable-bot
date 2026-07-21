@@ -104,6 +104,34 @@ class TradingBot:
             return float(self.exchange.equity())
         return float(self.exchange.fetch_free_usdt())
 
+    def _sanitize_and_save_equity(self, equity: float) -> float:
+        """Persist equity; if absurd vs deposit, reset paper cash and SQLite."""
+        from src.app_factory import _sane_equity
+
+        capital = float(self.cfg.backtest.get("initial_capital", 10_000))
+        sane = _sane_equity(equity, capital)
+        if sane != equity and abs(sane - equity) > 1e-6:
+            logger.error(
+                "Corrupt equity %.6e → reset to deposit %.2f",
+                equity,
+                capital,
+            )
+            self.store.audit("equity_sanitized", previous=equity, equity=capital)
+            acct = getattr(self.exchange, "account", None)
+            if acct is None and hasattr(self.exchange, "paper"):
+                acct = self.exchange.paper.account
+            if acct is not None:
+                acct.cash = capital
+                acct.positions.clear()
+                self.positions.clear()
+            self.store.clear_equity_history()
+            self.store.save_equity(capital)
+            self.risk.update_equity(capital)
+            self.risk.state.peak_equity = capital
+            return capital
+        self.store.save_equity(sane)
+        return sane
+
     def _execute(self, symbol: str, action_type: ActionType, decision: Any, snap: MarketSnapshot) -> None:
         coid = self._client_order_id(symbol, action_type.value)
         if not self.store.register_order(
@@ -251,7 +279,6 @@ class TradingBot:
         snap = self.build_snapshot(symbol)
         equity = self._equity()
         self.risk.update_equity(equity)
-        self.store.save_equity(equity)
 
         blackout, news_reason = self.calendar.is_blackout(snap.timestamp)
         open_syms = [s for s, p in self.positions.items() if p.is_open and s != symbol]
@@ -300,6 +327,11 @@ class TradingBot:
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Error processing %s: %s", symbol, exc)
                 self.store.audit("symbol_error", symbol=symbol, error=str(exc))
+        # Persist equity once per cycle (after all fills this tick)
+        try:
+            self._sanitize_and_save_equity(self._equity())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("equity save failed: %s", exc)
 
     def run(self) -> None:
         self._running = True

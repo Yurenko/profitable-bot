@@ -145,6 +145,22 @@ class CCXTExchange:
         usdt = bal.get("USDT") or {}
         return float(usdt.get("free") or bal.get("free", {}).get("USDT") or 0.0)
 
+    def equity(self) -> float:
+        """Wallet equity for live: USDT total (free+used) when available, else free."""
+        try:
+            bal = self.fetch_balance()
+            usdt = bal.get("USDT") or {}
+            total = usdt.get("total")
+            if total is not None:
+                return float(total)
+            free = float(usdt.get("free") or 0.0)
+            used = float(usdt.get("used") or 0.0)
+            if free or used:
+                return free + used
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("equity from balance failed: %s", exc)
+        return self.fetch_free_usdt()
+
     def fetch_funding_rate(self, symbol: str) -> float:
         if self._feed is not None:
             cached = self._feed.get_funding_rate(symbol)

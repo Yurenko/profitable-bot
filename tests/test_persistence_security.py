@@ -65,3 +65,22 @@ def test_crash_restart_does_not_duplicate_position(tmp_path):
     positions = store_b.load_positions()
     assert len(positions) == 1
     assert not store_b.register_order(coid, "ETH/USDT:USDT", "enter", {})
+
+
+def test_paper_rejects_zero_mark():
+    ex = PaperExchange(initial_equity=1000, taker_fee=0.0004, leverage=5)
+    try:
+        ex.set_mark("X", 0)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+
+
+def test_sane_equity_resets_corruption():
+    from src.app_factory import _sane_equity
+
+    assert _sane_equity(200, 200) == 200
+    assert _sane_equity(1e110, 200) == 200
+    assert _sane_equity(float("nan"), 200) == 200
+    assert abs(_sane_equity(250, 200) - 250) < 1e-9

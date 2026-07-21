@@ -42,12 +42,46 @@ async function api(path, opts = {}) {
 
 function fmtUsd(n) {
   if (n == null || isNaN(n)) return "—";
-  return "$" + Number(n).toLocaleString("uk-UA", { maximumFractionDigits: 2 });
+  const v = Number(n);
+  if (!Number.isFinite(v) || Math.abs(v) > 1e12) return "⚠ пошкоджено — скиньте equity";
+  return "$" + v.toLocaleString("uk-UA", { maximumFractionDigits: 2 });
 }
 
 function fmtPct(n) {
   if (n == null || isNaN(n)) return "—";
-  return (Number(n) * 100).toFixed(2) + "%";
+  const v = Number(n);
+  if (!Number.isFinite(v) || Math.abs(v) > 1e6) return "—";
+  return (v * 100).toFixed(2) + "%";
+}
+
+/** Local timezone, e.g. 21.07.2026 04:45:53 */
+function fmtTs(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString("uk-UA", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function fmtTsShort(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString("uk-UA", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
 }
 
 function switchTab(name) {
@@ -78,7 +112,7 @@ function renderStatus(d) {
   $("#statSymbols").textContent = (d.symbols || []).join(", ") || "—";
 
   $("#statTestnet").textContent = d.testnet ? "Так ✓" : "НІ ⚠";
-  $("#statLastTick").textContent = d.last_tick ? new Date(d.last_tick).toLocaleTimeString("uk-UA") : "—";
+  $("#statLastTick").textContent = d.last_tick ? fmtTsShort(d.last_tick) : "—";
 
   const pill = $("#statusPill");
   if (d.bot_running) {
@@ -101,17 +135,32 @@ function renderStatus(d) {
     tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted)">Немає відкритих позицій</td></tr>';
   }
 
-  // Audit preview
+  // Audit preview — local time
   const preview = d.audit_preview || [];
   $("#auditPreview").innerHTML = preview
     .map(
       (a) =>
-        `<div class="log-item"><span class="ts">${a.ts || ""}</span> <span class="ev">${a.event}</span> ${a.symbol || ""} ${a.action || ""}</div>`
+        `<div class="log-item"><span class="ts">${fmtTs(a.ts)}</span> <span class="ev">${a.event}</span> ${a.symbol || ""} ${a.action || ""}</div>`
     )
     .join("") || '<div class="hint">Подій поки немає</div>';
 
-  // Backtest status
+  // Equity curve: while bot runs — live SQLite; otherwise show last backtest if any
   const bt = d.backtest || {};
+  const hint = document.getElementById("equityChartHint");
+  if (d.bot_running && d.equity_points?.length) {
+    updateChart(d.equity_points);
+    if (hint) hint.textContent = "Крива з роботи бота (paper/live), оновлюється кожен тік.";
+  } else if (bt.metrics && bt.equity_points?.length) {
+    updateChart(bt.equity_points);
+    if (hint) hint.textContent = "Показано криву останнього бектесту.";
+  } else if (d.equity_points?.length) {
+    updateChart(d.equity_points);
+    if (hint) hint.textContent = "Крива з попередньої сесії бота (SQLite).";
+  } else if (hint) {
+    hint.textContent = "Немає точок equity — запустіть Paper/Live або бектест.";
+  }
+
+  // Backtest status
   const btInfo = document.getElementById("btDataInfo");
   const btFileInfo = document.getElementById("btFileInfo");
   if (bt.running) {
@@ -120,7 +169,7 @@ function renderStatus(d) {
   } else if (bt.error) {
     $("#btStatus").textContent = "❌ " + bt.error;
   } else if (bt.metrics) {
-    $("#btStatus").textContent = "✅ Завершено " + (bt.finished_at ? new Date(bt.finished_at).toLocaleString("uk-UA") : "");
+    $("#btStatus").textContent = "✅ Завершено " + (bt.finished_at ? fmtTs(bt.finished_at) : "");
     if (bt.data_info && btInfo) {
       const di = bt.data_info;
       const src = di.source === "historical" ? "📁 Реальні дані" : "🧪 Синтетика";
@@ -129,7 +178,6 @@ function renderStatus(d) {
         + (di.note ? `<br><em>${di.note}</em>` : "");
     }
     renderBtMetrics(bt);
-    if (bt.equity_points?.length) updateChart(bt.equity_points);
   } else {
     const hasFiles = (d.history_files || []).length > 0;
     $("#btStatus").textContent = hasFiles
@@ -217,7 +265,8 @@ function renderBtMetrics(bt) {
 
 function updateChart(points) {
   const ctx = $("#equityChart");
-  const labels = points.map((p) => p.t.slice(0, 16));
+  if (!ctx || !points?.length) return;
+  const labels = points.map((p) => fmtTsShort(p.t));
   const data = points.map((p) => p.v);
   if (chart) {
     chart.data.labels = labels;
@@ -359,7 +408,7 @@ async function loadAuditFull() {
   $("#auditFull").innerHTML = rows
     .map(
       (a) =>
-        `<div class="log-item"><span class="ts">${a.ts || ""}</span> <span class="ev">${a.event}</span> ${JSON.stringify(a).slice(0, 120)}</div>`
+        `<div class="log-item"><span class="ts">${fmtTs(a.ts)}</span> <span class="ev">${a.event}</span> ${JSON.stringify(a).slice(0, 120)}</div>`
     )
     .join("") || '<div class="hint">Порожньо</div>';
 

@@ -43,7 +43,10 @@ class PaperExchange:
         self.orders: list[dict[str, Any]] = []
 
     def set_mark(self, symbol: str, price: float) -> None:
-        self.marks[symbol] = price
+        px = float(price)
+        if px <= 0 or px != px:  # NaN
+            raise ValueError(f"Invalid mark price for {symbol}: {price}")
+        self.marks[symbol] = px
 
     def set_ohlcv(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
         self.ohlcv[(symbol, timeframe)] = df
@@ -71,7 +74,8 @@ class PaperExchange:
         for sym, pos in self.account.positions.items():
             if pos.is_open:
                 mark = self.marks.get(sym, pos.avg_entry)
-                upnl += pos.unrealized_pnl(mark)
+                if mark and mark > 0:
+                    upnl += pos.unrealized_pnl(mark)
         return self.account.cash + locked + upnl
 
     def fetch_funding_rate(self, symbol: str) -> float:
@@ -95,8 +99,10 @@ class PaperExchange:
     ) -> dict[str, Any]:
         params = params or {}
         price = self.marks.get(symbol)
-        if price is None:
-            raise RuntimeError(f"No mark price for {symbol}")
+        if price is None or price <= 0:
+            raise RuntimeError(f"No valid mark price for {symbol}")
+        if amount <= 0:
+            raise RuntimeError(f"Invalid order amount: {amount}")
         notional = amount * price
         fee = abs(notional * self.taker_fee)
         order_id = params.get("clientOrderId") or str(uuid.uuid4())
@@ -106,23 +112,39 @@ class PaperExchange:
 
         if side.lower() == "buy":
             margin = float(params.get("margin") or (notional / self.leverage))
+            if margin <= 0:
+                raise RuntimeError(f"Invalid margin: {margin}")
             cost = margin + fee
             if cost > self.account.cash + 1e-9:
                 raise RuntimeError("Insufficient free margin")
             self.account.cash -= cost
             is_dca = pos.is_open
             pos.add(price, amount, margin, fee=fee, is_dca=is_dca)
+            if pos.avg_entry <= 0:
+                raise RuntimeError("avg_entry must be positive after buy")
             self.account.positions[symbol] = pos
             self.account.fees_paid += fee
         elif side.lower() == "sell":
             if not pos.is_open:
                 raise RuntimeError("No position to sell")
+            if pos.avg_entry <= 0:
+                raise RuntimeError("Corrupt position avg_entry — refuse sell")
             margin_before = pos.margin
             qty_before = pos.qty
+            if amount > qty_before + 1e-12:
+                amount = qty_before
             pnl_net = pos.reduce(amount, price, fee=fee)
-            # Gross PnL before fee = pnl_net + fee
+            # Cap absurd PnL (e.g. if prices were ever corrupted)
+            max_abs_pnl = max(abs(margin_before) * 20, notional * 2, 1.0)
+            if abs(pnl_net) > max_abs_pnl:
+                logger.error(
+                    "Refusing absurd paper PnL %.4e on %s (cap %.4e) — check mark/entry",
+                    pnl_net,
+                    symbol,
+                    max_abs_pnl,
+                )
+                raise RuntimeError(f"Absurd paper PnL {pnl_net:.4e} rejected")
             released = margin_before * (amount / qty_before)
-            # Cash gets released margin + net pnl (reduce already subtracted fee from return)
             self.account.cash += released + pnl_net
             self.account.realized_pnl += pnl_net
             self.account.fees_paid += fee

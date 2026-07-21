@@ -31,17 +31,30 @@ def _ws_kwargs(cfg: AppConfig) -> dict:
     }
 
 
+def _sane_equity(value: float, capital: float) -> float:
+    """Reject NaN/Inf and absurd equity vs configured deposit (corruption guard)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return capital
+    if v != v or v in (float("inf"), float("-inf")):  # NaN / Inf
+        return capital
+    if v <= 0:
+        return capital
+    # More than 50× deposit is almost certainly a paper bug / bad restore
+    if capital > 0 and v > max(capital * 50, capital + 1_000_000):
+        return capital
+    return v
+
+
 def create_hybrid_paper(cfg: AppConfig, store: StateStore) -> tuple[object, PaperExchange]:
     capital = float(cfg.backtest.get("initial_capital", 10_000))
     last = store.last_equity(0)
-    # Prefer config deposit if stored equity looks like an old default (e.g. 10k vs 100)
-    if last <= 0:
-        equity = capital
-    elif last >= capital * 20 and capital <= 500:
-        equity = capital
+    equity = _sane_equity(last, capital) if last > 0 else capital
+    if last > 0 and equity == capital and abs(last - capital) > 1e-6:
+        # Stored equity was corrupt — reset to deposit
         store.save_equity(capital)
-    else:
-        equity = last
+        store.audit("equity_sanitized", previous=last, equity=capital)
     paper = PaperExchange(
         initial_equity=equity,
         taker_fee=cfg.risk.taker_fee,
@@ -63,9 +76,23 @@ def create_hybrid_paper(cfg: AppConfig, store: StateStore) -> tuple[object, Pape
         def fetch_ohlcv(self, *a, **k):
             return self.data.fetch_ohlcv(*a, **k)
 
+        def _safe_mark(self, symbol: str, preferred: float | None = None) -> float:
+            if preferred is not None and preferred > 0:
+                return float(preferred)
+            existing = self.paper.marks.get(symbol)
+            if existing is not None and existing > 0:
+                return float(existing)
+            t = self.data.fetch_ticker(symbol)
+            px = float(t.get("last") or t.get("close") or 0)
+            if px <= 0:
+                raise RuntimeError(f"Invalid mark price for {symbol}: {px}")
+            return px
+
         def fetch_ticker(self, symbol):
             t = self.data.fetch_ticker(symbol)
-            self.paper.set_mark(symbol, float(t.get("last") or t.get("close") or 0))
+            px = float(t.get("last") or t.get("close") or 0)
+            if px > 0:
+                self.paper.set_mark(symbol, px)
             return t
 
         def fetch_funding_rate(self, symbol):
@@ -86,16 +113,32 @@ def create_hybrid_paper(cfg: AppConfig, store: StateStore) -> tuple[object, Pape
         def set_margin_mode(self, symbol, mode="isolated"):
             return self.paper.set_margin_mode(symbol, mode)
 
+        def set_mark(self, symbol, price):
+            if price and float(price) > 0:
+                self.paper.set_mark(symbol, float(price))
+
         def create_market_order(self, symbol, side, amount, params=None):
-            t = self.data.fetch_ticker(symbol)
-            self.paper.set_mark(symbol, float(t.get("last") or t.get("close") or 0))
+            # Prefer mark already set by bot from strategy snapshot — never overwrite with 0
+            existing = self.paper.marks.get(symbol)
+            if existing is None or existing <= 0:
+                self.paper.set_mark(symbol, self._safe_mark(symbol))
             return self.paper.create_market_order(symbol, side, amount, params)
 
         def create_limit_order(self, symbol, side, amount, price, params=None):
-            self.paper.set_mark(symbol, float(price))
-            if hasattr(self.paper, "create_limit_order"):
-                return self.paper.create_limit_order(symbol, side, amount, price, params)
-            return self.paper.create_market_order(symbol, side, amount, params)
+            # Paper: do NOT fill at limit price as market — that invented fake PnL.
+            # Grid DCA is filled by strategy when market price actually hits the level.
+            params = params or {}
+            return {
+                "id": params.get("clientOrderId") or f"paper_limit_{symbol}",
+                "clientOrderId": params.get("clientOrderId"),
+                "symbol": symbol,
+                "side": side,
+                "amount": amount,
+                "price": float(price),
+                "type": "limit",
+                "status": "open",
+                "info": {"paper": True, "note": "pending_until_price_hit"},
+            }
 
         def add_margin(self, symbol, amount):
             return self.paper.add_margin(symbol, amount)

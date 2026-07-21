@@ -169,6 +169,22 @@ class StateStore:
         val = self.get_kv("last_equity", default)
         return float(val if val is not None else default)
 
+    def equity_history(self, limit: int = 300) -> list[dict[str, Any]]:
+        """Recent equity snapshots for live/paper chart (oldest → newest)."""
+        limit = max(1, min(int(limit), 5000))
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT equity, ts FROM equity_snapshots ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        points = [{"t": row["ts"], "v": float(row["equity"])} for row in rows]
+        points.reverse()
+        return points
+
+    def clear_equity_history(self) -> None:
+        with self._db() as conn:
+            conn.execute("DELETE FROM equity_snapshots")
+
     # --- Audit ---
     def audit(self, event: str, **fields: Any) -> None:
         record = {"ts": _utcnow(), "event": event, **fields}

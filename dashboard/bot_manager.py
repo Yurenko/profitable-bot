@@ -204,6 +204,7 @@ class BotManager:
         cfg = load_config(self.config_path)
         capital = float(cfg.backtest.get("initial_capital", 100))
         store = create_store(cfg)
+        store.clear_equity_history()
         store.save_equity(capital)
         store.set_kv("last_equity", capital)
         store.audit("equity_reset", equity=capital)
@@ -408,8 +409,16 @@ class BotManager:
         self.ensure_started(default_mode="paper")
         cfg = load_config(self.config_path)
         store = create_store(cfg)
+        from src.app_factory import _sane_equity
+
+        capital = float(cfg.backtest.get("initial_capital", 10_000))
+        raw_equity = store.last_equity(capital)
+        equity = _sane_equity(raw_equity, capital)
+        if abs(equity - raw_equity) > 1e-6:
+            store.clear_equity_history()
+            store.save_equity(equity)
+            store.audit("equity_sanitized", previous=raw_equity, equity=equity)
         positions = store.load_positions()
-        equity = store.last_equity(float(cfg.backtest.get("initial_capital", 10_000)))
         pos_list = []
         for sym, p in positions.items():
             if p.is_open:
@@ -423,6 +432,7 @@ class BotManager:
                         "fees_paid": p.fees_paid,
                     }
                 )
+        live_curve = store.equity_history(limit=300)
         with self._lock:
             bt = self._backtest
             return {
@@ -433,7 +443,8 @@ class BotManager:
                 "tick_count": self._tick_count,
                 "last_error": self._last_error,
                 "equity": equity,
-                "initial_capital": float(cfg.backtest.get("initial_capital", 10_000)),
+                "initial_capital": capital,
+                "equity_points": live_curve,
                 "positions": pos_list,
                 "symbols": cfg.symbols,
                 "testnet": cfg.exchange.testnet,
