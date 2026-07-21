@@ -298,7 +298,14 @@ class BotManager:
                 ]
                 out_path = Path("data/backtest_equity.csv")
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                result.equity_curve.to_csv(out_path, header=["equity"])
+                try:
+                    result.equity_curve.to_csv(out_path, header=["equity"])
+                except OSError:
+                    # Windows can occasionally fail on relative path writes
+                    # when process cwd is unexpected; retry with absolute path.
+                    abs_out = (Path(__file__).resolve().parent.parent / "data" / "backtest_equity.csv")
+                    abs_out.parent.mkdir(parents=True, exist_ok=True)
+                    result.equity_curve.to_csv(abs_out, header=["equity"])
                 di = result.data_info
                 sells = [t for t in result.trades if t.get("side") == "sell"]
                 wins = sum(1 for t in sells if float(t.get("pnl", 0)) > 0)

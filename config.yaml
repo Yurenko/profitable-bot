@@ -8,13 +8,8 @@ exchange:
   default_type: swap
 symbols:
 - SOL/USDT:USDT
-- ATOM/USDT:USDT
 - NEAR/USDT:USDT
 - LINK/USDT:USDT
-- AVAX/USDT:USDT
-- DOT/USDT:USDT
-- ADA/USDT:USDT
-- INJ/USDT:USDT
 strategy:
   leverage: 5
   margin_mode: isolated
@@ -40,7 +35,7 @@ strategy:
   funding_rate_max: 0.0005
   oi_change_lookback: 12
   oi_rise_threshold_pct: 0.03
-  tp_min_pct: 0.05
+  tp_min_pct: 0.03
   tp_strong_pct: 0.1
   rsi_5m_strong_oversold: 25
   trailing_tp_enabled: false
@@ -76,7 +71,7 @@ persistence:
 backtest:
   start: '2021-01-01'
   end: '2026-12-31'
-  initial_capital: 200
+  initial_capital: 50000
   timeframe_primary: 1m
   data_dir: data/historical
   walk_forward:
