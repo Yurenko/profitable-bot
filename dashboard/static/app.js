@@ -22,8 +22,13 @@ function toast(msg, ok = true) {
 async function api(path, opts = {}) {
   const r = await fetch(path, {
     headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     ...opts,
   });
+  if (r.status === 401 && !path.startsWith("/api/login")) {
+    location.href = "/login";
+    return { ok: false, error: "Unauthorized" };
+  }
   let data = {};
   try {
     data = await r.json();
@@ -480,7 +485,14 @@ function connectWs() {
       renderStatus(JSON.parse(e.data));
     } catch (_) {}
   };
-  ws.onclose = () => setTimeout(connectWs, 3000);
+  ws.onclose = (ev) => {
+    // 4401 = not authenticated (server closed before accept)
+    if (ev.code === 4401) {
+      location.href = "/login";
+      return;
+    }
+    setTimeout(connectWs, 3000);
+  };
 }
 
 // Events

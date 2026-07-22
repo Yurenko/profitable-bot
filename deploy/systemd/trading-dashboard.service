@@ -1,5 +1,5 @@
 [Unit]
-Description=MRDCA dashboard (read-only UI; bot runs in trading-bot-paper.service)
+Description=MRDCA dashboard + bot (Paper/Live via UI; auto-resumes from SQLite)
 After=network-online.target
 
 [Service]

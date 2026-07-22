@@ -6,17 +6,29 @@ import json
 import webbrowser
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
 
+from dashboard.auth import (
+    COOKIE_NAME,
+    SESSION_TTL_SEC,
+    auth_required,
+    check_password,
+    is_authenticated,
+    make_session_token,
+)
 from dashboard.bot_manager import BotManager
 from src.config import load_config
 from src.config_io import config_to_api_dict
 
 STATIC = Path(__file__).resolve().parent / "static"
 manager = BotManager()
+
+# Paths that do not require a session cookie
+_PUBLIC_EXACT = {"/login", "/api/login", "/api/auth/status", "/favicon.ico"}
 
 
 class ConfigPatch(BaseModel):
@@ -45,8 +57,87 @@ class DownloadRequest(BaseModel):
     timeframe: str = "1m"
 
 
+class LoginRequest(BaseModel):
+    password: str = ""
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if not auth_required():
+            return await call_next(request)
+
+        path = request.url.path
+        if path in _PUBLIC_EXACT:
+            return await call_next(request)
+
+        token = request.cookies.get(COOKIE_NAME)
+        if is_authenticated(token):
+            return await call_next(request)
+
+        # HTML / root → login page; API / static → 401
+        accept = request.headers.get("accept", "")
+        if path == "/" or "text/html" in accept:
+            return RedirectResponse(url="/login", status_code=302)
+        return JSONResponse(
+            {"ok": False, "error": "Unauthorized", "login": "/login"},
+            status_code=401,
+        )
+
+
 app = FastAPI(title="MRDCA Trading Dashboard", version="1.0.0")
+app.add_middleware(AuthMiddleware)
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+
+@app.on_event("startup")
+async def _resume_bot_on_startup() -> None:
+    """Resume bot thread if bot_active was persisted (dashboard-only 24/7 setup)."""
+    manager.ensure_started(default_mode="paper")
+
+
+@app.get("/login")
+async def login_page(request: Request):
+    if is_authenticated(request.cookies.get(COOKIE_NAME)):
+        return RedirectResponse(url="/", status_code=302)
+    return FileResponse(STATIC / "login.html")
+
+
+@app.get("/api/auth/status")
+async def api_auth_status(request: Request) -> dict:
+    return {
+        "auth_required": auth_required(),
+        "authenticated": is_authenticated(request.cookies.get(COOKIE_NAME)),
+    }
+
+
+@app.post("/api/login")
+async def api_login(body: LoginRequest) -> JSONResponse:
+    if not auth_required():
+        return JSONResponse({"ok": True, "auth_required": False})
+    if not check_password(body.password):
+        return JSONResponse(
+            {"ok": False, "error": "Невірний пароль"},
+            status_code=401,
+        )
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(
+        key=COOKIE_NAME,
+        value=make_session_token(),
+        max_age=SESSION_TTL_SEC,
+        httponly=True,
+        samesite="lax",
+        path="/",
+        # HTTP on VPS IP:8080 — Secure cookie would break login without HTTPS
+        secure=False,
+    )
+    return resp
+
+
+@app.post("/api/logout")
+async def api_logout() -> JSONResponse:
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(COOKIE_NAME, path="/")
+    return resp
 
 
 @app.get("/")
@@ -147,6 +238,10 @@ async def api_history_files() -> list:
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
+    # WebSocket bypasses HTTP middleware — check cookie here
+    if not is_authenticated(ws.cookies.get(COOKIE_NAME)):
+        await ws.close(code=4401)
+        return
     await ws.accept()
     while True:
         try:
@@ -159,6 +254,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             # Log but keep the socket alive — don't let one bad tick kill the stream
             try:
                 import logging as _log
+
                 _log.getLogger(__name__).debug("ws tick error: %s", exc)
                 await ws.send_text(json.dumps({"error": str(exc)}, default=str))
             except Exception:

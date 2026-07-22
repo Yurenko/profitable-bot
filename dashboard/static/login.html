@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Вхід — MRDCA Bot</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --card: #162032;
+      --border: rgba(148, 163, 184, 0.12);
+      --text: #e8eef7;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --danger: #f87171;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      font-family: Inter, system-ui, -apple-system, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(ellipse 80% 50% at 20% -10%, rgba(56, 189, 248, 0.14), transparent),
+        radial-gradient(ellipse 60% 40% at 100% 0%, rgba(34, 211, 238, 0.08), transparent),
+        var(--bg);
+    }
+    .wrap {
+      min-height: 100%;
+      display: grid;
+      place-items: center;
+      padding: 1.5rem;
+    }
+    .card {
+      width: 100%;
+      max-width: 380px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 2rem 1.75rem;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+    }
+    .brand {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      margin-bottom: 1.5rem;
+    }
+    .brand-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #38bdf8, #22d3ee);
+      display: grid;
+      place-items: center;
+      font-size: 1.2rem;
+    }
+    h1 { font-size: 1.15rem; font-weight: 700; }
+    .sub { font-size: 0.8rem; color: var(--muted); margin-top: 0.15rem; }
+    label {
+      display: block;
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 0.4rem;
+    }
+    input[type="password"] {
+      width: 100%;
+      padding: 0.75rem 0.9rem;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #0f172a;
+      color: var(--text);
+      font-size: 1rem;
+      outline: none;
+    }
+    input[type="password"]:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.15);
+    }
+    button {
+      width: 100%;
+      margin-top: 1rem;
+      padding: 0.8rem;
+      border: none;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #38bdf8, #22d3ee);
+      color: #0b1220;
+      font-weight: 700;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    .err {
+      margin-top: 0.85rem;
+      color: var(--danger);
+      font-size: 0.85rem;
+      min-height: 1.2em;
+    }
+    .hint {
+      margin-top: 1.25rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <form class="card" id="loginForm" autocomplete="current-password">
+      <div class="brand">
+        <div class="brand-icon">◈</div>
+        <div>
+          <h1>MRDCA Bot</h1>
+          <div class="sub">Введіть пароль для доступу</div>
+        </div>
+      </div>
+      <label for="password">Пароль</label>
+      <input id="password" name="password" type="password" required autofocus placeholder="••••••••" />
+      <button type="submit" id="btn">Увійти</button>
+      <div class="err" id="err"></div>
+      <p class="hint">Сесія діє 24 години. Пароль задається в <code>.env</code> як <code>DASHBOARD_PASSWORD</code>.</p>
+    </form>
+  </div>
+  <script>
+    const form = document.getElementById("loginForm");
+    const err = document.getElementById("err");
+    const btn = document.getElementById("btn");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.textContent = "";
+      btn.disabled = true;
+      try {
+        const password = document.getElementById("password").value;
+        const r = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || !data.ok) {
+          err.textContent = data.error || "Невірний пароль";
+          btn.disabled = false;
+          return;
+        }
+        location.href = "/";
+      } catch (_) {
+        err.textContent = "Помилка зʼєднання";
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -30,25 +30,25 @@
 
 ---
 
-## Рекомендована схема
+## Рекомендована схема (один сервіс)
 
 ```
-┌─────────────────┐     ┌──────────────────┐
-│  systemd        │     │  Binance API     │
-│  python main.py │────▶│  (REST + WS)     │
-│  paper / live   │     └──────────────────┘
-└────────┬────────┘
-         │ пише
-         ▼
-┌─────────────────┐     ┌──────────────────┐ (опційно)
-│ bot_state.sqlite│◀────│ Dashboard        │
-│ audit.jsonl     │     │ python main.py   │
-└─────────────────┘     │ dashboard        │
-                        └──────────────────┘
+┌──────────────────────────────┐     ┌──────────────────┐
+│  systemd trading-dashboard   │────▶│  Binance API     │
+│  python main.py dashboard    │     │  (REST + WS)     │
+│  + бот у фоні (Paper/Live)   │     └──────────────────┘
+└──────────────┬───────────────┘
+               │ пише
+               ▼
+        bot_state.sqlite
+        audit.jsonl
 ```
 
-1. **Бот** — окремий процес 24/7 (`main.py paper` або `live`).
-2. **Dashboard** — опційно, тільки для перегляду (не обов’язковий для торгівлі).
+1. **Dashboard** — єдиний процес 24/7 (`trading-dashboard.service`).
+2. Бот запускається кнопкою **Paper** / **Live** у UI; стан зберігається в SQLite (`bot_active`).
+3. Після рестарту dashboard бот **автоматично відновлюється** (якщо раніше був запущений).
+
+> **Не запускайте одночасно** `trading-bot-paper` і `trading-dashboard` — буде **два боти**, подвійні входи і конфлікти в SQLite.
 
 ---
 
@@ -77,8 +77,10 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-nano .env   # EXCHANGE_API_KEY, EXCHANGE_API_SECRET
+nano .env   # EXCHANGE_API_KEY, EXCHANGE_API_SECRET, DASHBOARD_PASSWORD
 ```
+
+Обовʼязково задайте **`DASHBOARD_PASSWORD`** — без нього dashboard на `0.0.0.0:8080` відкритий для всіх.
 
 Перевірка одного циклу:
 
@@ -95,46 +97,51 @@ python main.py paper
 
 ---
 
-## Крок 3 — systemd (автостарт після ребуту)
-
-Скопіюй unit-файл (зміни шлях і користувача):
+## Крок 3 — systemd: тільки dashboard
 
 ```bash
-sudo cp deploy/systemd/trading-bot-paper.service /etc/systemd/system/
-sudo nano /etc/systemd/system/trading-bot-paper.service
+sudo cp deploy/systemd/trading-dashboard.service /etc/systemd/system/
+sudo nano /etc/systemd/system/trading-dashboard.service
 # WorkingDirectory=/home/ubuntu/profitable-bot
 # User=ubuntu
-# ExecStart=.../python main.py paper
+# ExecStart=.../python main.py dashboard --host 0.0.0.0 --port 8080 --no-browser
 
 sudo systemctl daemon-reload
-sudo systemctl enable trading-bot-paper
-sudo systemctl start trading-bot-paper
-sudo systemctl status trading-bot-paper
+sudo systemctl enable trading-dashboard
+sudo systemctl start trading-dashboard
+sudo systemctl status trading-dashboard
 ```
+
+Відкрий `http://IP:8080` і натисни **Paper** (або **Live**) — бот працює у фоні всередині dashboard.
 
 Логи:
 
 ```bash
-journalctl -u trading-bot-paper -f
+journalctl -u trading-dashboard -f
 tail -f logs/bot.log
 tail -f logs/audit.jsonl
 ```
 
 ---
 
-## Крок 4 — Dashboard (опційно, з іншого комп’ютера)
+## Видалити trading-bot-paper (якщо вже був встановлений)
 
-На VPS:
+Якщо раніше ставили окремий сервіс бота — **обовʼязково вимкніть його**, інакше два процеси торгують одночасно:
 
 ```bash
-sudo cp deploy/systemd/trading-dashboard.service /etc/systemd/system/
-# налаштуй шляхи
-sudo systemctl enable --now trading-dashboard
+sudo systemctl stop trading-bot-paper
+sudo systemctl disable trading-bot-paper
+sudo rm /etc/systemd/system/trading-bot-paper.service
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
 ```
 
-Відкрий `http://IP:8080`. Бот уже крутиться в systemd — dashboard лише показує стан з SQLite.
+Перевірка — має бути лише dashboard:
 
-**Не запускай бота кнопкою Paper на dashboard**, якщо вже працює systemd — буде два процеси.
+```bash
+sudo systemctl status trading-dashboard
+sudo systemctl status trading-bot-paper   # → Unit trading-bot-paper.service could not be found
+```
 
 ---
 
@@ -169,10 +176,10 @@ tail -20 logs/audit.jsonl
 4. Потім:
 
 ```bash
-sudo systemctl stop trading-bot-paper
-sudo cp deploy/systemd/trading-bot-live.service /etc/systemd/system/
-# налаштуй і:
-sudo systemctl enable --now trading-bot-live
+sudo systemctl stop trading-dashboard
+# змінити config / .env
+sudo systemctl start trading-dashboard
+# у UI натиснути Live (або Paper)
 ```
 
 ---
@@ -189,7 +196,7 @@ sudo systemctl enable --now trading-bot-live
 
 | Задача | Рішення |
 |--------|---------|
-| 24/7 без вкладки | VPS + `python main.py paper` + systemd |
+| 24/7 без вкладки | VPS + `trading-dashboard.service` + Paper у UI |
 | Дані не губляться | SQLite на диску VPS (не Vercel) |
 | Входи / DCA / TP | Цикл `bot.py` кожні `poll_interval_sec` |
 | Моніторинг | Dashboard або `audit.jsonl` |
