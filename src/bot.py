@@ -64,9 +64,25 @@ class TradingBot:
             self.risk.state.peak_equity = max(self.risk.state.peak_equity, last_eq)
 
     def _client_order_id(self, symbol: str, action: str) -> str:
-        ts = int(time.time() * 1000)
-        safe = symbol.replace("/", "").replace(":", "")
-        return f"mrdca_{safe}_{action}_{ts}_{uuid.uuid4().hex[:8]}"
+        """Binance requires clientOrderId length < 36 chars."""
+        base = symbol.split("/")[0].replace("-", "")[:6]
+        act_map = {
+            "enter": "en",
+            "dca": "dc",
+            "full_tp": "tp",
+            "partial_tp": "pt",
+            "trail_exit": "tr",
+            "margin_topup": "mg",
+        }
+        if action.startswith("grid"):
+            act = "g" + "".join(c for c in action if c.isdigit())[:2] or "g"
+        else:
+            act = act_map.get(action, (action or "x")[:3])
+        # last 8 digits of ms + 6 hex ≈ unique, keeps total well under 36
+        ts = f"{int(time.time() * 1000) % 10**8:08d}"
+        rnd = uuid.uuid4().hex[:6]
+        coid = f"m{base}{act}{ts}{rnd}"
+        return coid[:35]
 
     def _fetch_mtf(self, symbol: str) -> dict[str, pd.DataFrame]:
         s = self.cfg.strategy

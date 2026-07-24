@@ -52,6 +52,8 @@
 - [https://console.aws.amazon.com/](https://console.aws.amazon.com/)
 - Регіон (правий верхній кут): **Europe (Frankfurt) `eu-central-1`** або **Stockholm `eu-north-1`** — ближче до України, менша затримка до Binance.
 
+> **Критично:** не ставте EC2 у **США** (`us-east-1`, `us-west-2` тощо). Binance повертає **451 Restricted location** і API (баланс, ордери) не працюватиме. Потрібен регіон EU / Asia (Frankfurt, Ireland, Singapore, Tokyo).
+
 ---
 
 ## Частина 2 — Створити EC2

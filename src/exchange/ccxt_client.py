@@ -23,7 +23,11 @@ class ExchangeError(RuntimeError):
 
 
 def fetch_futures_usdt_snapshot(cfg: ExchangeConfig) -> dict[str, Any]:
-    """One-shot REST USDT futures balance (no WebSocket). For dashboard display."""
+    """One-shot REST USDT futures balance (no WebSocket). For dashboard display.
+
+    Uses fapi account endpoint directly to avoid spot /sapi/capital/config calls
+    that often fail first on geo-restricted hosts.
+    """
     if not (cfg.api_key and cfg.api_secret):
         return {
             "ok": False,
@@ -43,7 +47,12 @@ def fetch_futures_usdt_snapshot(cfg: ExchangeConfig) -> dict[str, Any]:
                 "apiKey": cfg.api_key,
                 "secret": cfg.api_secret,
                 "enableRateLimit": True,
-                "options": {"defaultType": cfg.default_type or "swap"},
+                "options": {
+                    "defaultType": cfg.default_type or "swap",
+                    # Skip currency/sapi bootstrap where possible
+                    "fetchCurrencies": False,
+                    "warnOnFetchOpenOrdersWithoutSymbol": False,
+                },
             }
         )
         if cfg.testnet:
@@ -51,15 +60,34 @@ def fetch_futures_usdt_snapshot(cfg: ExchangeConfig) -> dict[str, Any]:
                 ex.set_sandbox_mode(True)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Sandbox mode: %s", exc)
-        bal = ex.fetch_balance()
-        usdt = bal.get("USDT") or {}
-        free = float(usdt.get("free") or bal.get("free", {}).get("USDT") or 0.0)
-        used = float(usdt.get("used") or bal.get("used", {}).get("USDT") or 0.0)
-        total = usdt.get("total")
-        if total is not None:
-            total_f = float(total)
-        else:
-            total_f = free + used
+
+        # Prefer raw USD-M futures wallet — avoids api.binance.com/sapi/...
+        free = used = total_f = 0.0
+        try:
+            acct = ex.fapiPrivateV2GetAccount()
+            assets = acct.get("assets") or []
+            for a in assets:
+                if str(a.get("asset", "")).upper() == "USDT":
+                    # walletBalance ≈ equity; availableBalance ≈ free
+                    wb = float(a.get("walletBalance") or 0)
+                    ab = float(a.get("availableBalance") or 0)
+                    total_f = wb
+                    free = ab
+                    used = max(0.0, wb - ab)
+                    break
+            if total_f == 0 and not assets:
+                # fallback: older shape
+                total_f = float(acct.get("totalWalletBalance") or 0)
+                free = float(acct.get("availableBalance") or 0)
+                used = max(0.0, total_f - free)
+        except AttributeError:
+            bal = ex.fetch_balance({"type": "swap"})
+            usdt = bal.get("USDT") or {}
+            free = float(usdt.get("free") or 0.0)
+            used = float(usdt.get("used") or 0.0)
+            total = usdt.get("total")
+            total_f = float(total) if total is not None else free + used
+
         return {
             "ok": True,
             "total": total_f,
@@ -69,10 +97,17 @@ def fetch_futures_usdt_snapshot(cfg: ExchangeConfig) -> dict[str, Any]:
             "exchange": cfg.id,
         }
     except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
         logger.warning("fetch_futures_usdt_snapshot failed: %s", exc)
+        if "451" in msg or "restricted location" in msg.lower() or "Eligibility" in msg:
+            msg = (
+                "Binance блокує цей сервер за геолокацією (часто AWS США). "
+                "Перенесіть EC2 у дозволений регіон: eu-central-1, eu-west-1, "
+                "ap-southeast-1, ap-northeast-1 — не us-east / us-west."
+            )
         return {
             "ok": False,
-            "error": str(exc),
+            "error": msg,
             "total": None,
             "free": None,
             "used": None,
