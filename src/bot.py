@@ -115,8 +115,24 @@ class TradingBot:
         return float(self.exchange.fetch_free_usdt())
 
     def _sanitize_and_save_equity(self, equity: float) -> float:
-        """Persist equity; if absurd vs deposit, reset paper cash and SQLite."""
+        """Persist equity; if absurd vs deposit, reset paper cash and SQLite.
+
+        Live mode: never reset to config initial_capital — equity comes from the exchange.
+        """
         from src.app_factory import _sane_equity
+
+        # Live: trust Binance futures wallet; only reject NaN/Inf/<=0
+        if getattr(self.cfg, "mode", "") == "live":
+            try:
+                v = float(equity)
+            except (TypeError, ValueError):
+                logger.error("Live equity invalid %r — skip save", equity)
+                return float(self.store.last_equity(0.0) or 0.0)
+            if v != v or v in (float("inf"), float("-inf")) or v <= 0:
+                logger.error("Live equity absurd %s — skip save", v)
+                return float(self.store.last_equity(0.0) or 0.0)
+            self.store.save_equity(v)
+            return v
 
         capital = float(self.cfg.backtest.get("initial_capital", 10_000))
         sane = _sane_equity(equity, capital)

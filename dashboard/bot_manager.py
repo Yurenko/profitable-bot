@@ -61,6 +61,25 @@ class BotManager:
         self._backtest = BacktestSnapshot()
         self._history_download = HistoryDownloadSnapshot()
         self._stop_event = threading.Event()
+        self._exchange_bal_cache: dict[str, Any] | None = None
+        self._exchange_bal_ts: float = 0.0
+
+    def get_exchange_balance(self, *, force: bool = False) -> dict[str, Any]:
+        """Futures USDT wallet from Binance (cached ~20s to avoid REST spam)."""
+        now = time.time()
+        if (
+            not force
+            and self._exchange_bal_cache is not None
+            and (now - self._exchange_bal_ts) < 20.0
+        ):
+            return self._exchange_bal_cache
+        cfg = load_config(self.config_path)
+        from src.exchange.ccxt_client import fetch_futures_usdt_snapshot
+
+        snap = fetch_futures_usdt_snapshot(cfg.exchange)
+        self._exchange_bal_cache = snap
+        self._exchange_bal_ts = now
+        return snap
 
     def _persist_bot_intent(self, *, active: bool, mode: str | None) -> None:
         """Persist desired bot state so it can auto-resume after serverless cold start.
@@ -430,11 +449,30 @@ class BotManager:
 
         capital = float(cfg.backtest.get("initial_capital", 10_000))
         raw_equity = store.last_equity(capital)
-        equity = _sane_equity(raw_equity, capital)
-        if abs(equity - raw_equity) > 1e-6:
+        paper_equity = _sane_equity(raw_equity, capital)
+        if abs(paper_equity - raw_equity) > 1e-6 and self._mode != "live":
             store.clear_equity_history()
-            store.save_equity(equity)
-            store.audit("equity_sanitized", previous=raw_equity, equity=equity)
+            store.save_equity(paper_equity)
+            store.audit("equity_sanitized", previous=raw_equity, equity=paper_equity)
+
+        # Always try to show real futures wallet (even in paper / stopped)
+        exchange_bal = self.get_exchange_balance()
+        exchange_total = exchange_bal.get("total") if exchange_bal.get("ok") else None
+
+        # Display + sizing source:
+        # - live running → Binance futures equity
+        # - otherwise → paper equity from SQLite / initial_capital
+        is_live = bool(self.is_running() and self._mode == "live")
+        if is_live and exchange_total is not None:
+            equity = float(exchange_total)
+        elif is_live and self._bot is not None:
+            try:
+                equity = float(self._bot._equity())
+            except Exception:  # noqa: BLE001
+                equity = paper_equity
+        else:
+            equity = paper_equity
+
         active_symbols = set(cfg.symbols)
         positions = store.load_positions()
         pos_list = []
@@ -461,8 +499,10 @@ class BotManager:
                 "tick_count": self._tick_count,
                 "last_error": self._last_error,
                 "equity": equity,
+                "paper_equity": paper_equity,
                 "initial_capital": capital,
                 "equity_points": live_curve,
+                "exchange_balance": exchange_bal,
                 "positions": pos_list,
                 "symbols": cfg.symbols,
                 "testnet": cfg.exchange.testnet,

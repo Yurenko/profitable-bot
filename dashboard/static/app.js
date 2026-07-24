@@ -117,12 +117,39 @@ function switchTab(name) {
 }
 
 function renderStatus(d) {
-  const pnl = d.equity - d.initial_capital;
-  const pnlPct = d.initial_capital ? pnl / d.initial_capital : 0;
+  const isLive = d.bot_running && d.bot_mode === "live";
+  const paperEq = d.paper_equity != null ? d.paper_equity : d.equity;
+  const displayEq = isLive ? d.equity : paperEq;
+  const pnlPct = !isLive && d.initial_capital ? (displayEq - d.initial_capital) / d.initial_capital : 0;
 
-  $("#statEquity").textContent = fmtUsd(d.equity);
-  $("#statPnl").textContent = `${pnl >= 0 ? "+" : ""}${fmtUsd(pnl)} (${fmtPct(pnlPct)})`;
-  $("#statPnl").className = "sub " + (pnl >= 0 ? "positive" : "negative");
+  const eqLabel = document.getElementById("statEquityLabel");
+  if (eqLabel) eqLabel.textContent = isLive ? "Equity (live)" : "Equity (paper)";
+  $("#statEquity").textContent = fmtUsd(displayEq);
+  if (isLive) {
+    $("#statPnl").textContent = "від балансу біржі · 1% входу від нього";
+    $("#statPnl").className = "sub";
+  } else {
+    const paperPnl = displayEq - d.initial_capital;
+    $("#statPnl").textContent = `${paperPnl >= 0 ? "+" : ""}${fmtUsd(paperPnl)} (${fmtPct(pnlPct)})`;
+    $("#statPnl").className = "sub " + (paperPnl >= 0 ? "positive" : "negative");
+  }
+
+  // Always show real futures wallet when keys work
+  const xb = d.exchange_balance || {};
+  const exEl = document.getElementById("statExchangeEquity");
+  const exDet = document.getElementById("statExchangeDetail");
+  if (exEl) {
+    if (xb.ok && xb.total != null) {
+      exEl.textContent = fmtUsd(xb.total);
+      if (exDet) {
+        const net = xb.testnet ? "testnet" : "mainnet";
+        exDet.textContent = `вільно ${fmtUsd(xb.free)} · в позиціях ${fmtUsd(xb.used)} · ${net}`;
+      }
+    } else {
+      exEl.textContent = "—";
+      if (exDet) exDet.textContent = xb.error || "Додайте API ключі в .env";
+    }
+  }
 
   $("#statMode").textContent = d.bot_running ? (d.bot_mode || "—").toUpperCase() : "Зупинено";
   $("#statTicks").textContent = d.tick_count ? `Тіків: ${d.tick_count}` : "—";

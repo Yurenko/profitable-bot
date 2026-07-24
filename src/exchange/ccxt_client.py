@@ -22,6 +22,70 @@ class ExchangeError(RuntimeError):
     pass
 
 
+def fetch_futures_usdt_snapshot(cfg: ExchangeConfig) -> dict[str, Any]:
+    """One-shot REST USDT futures balance (no WebSocket). For dashboard display."""
+    if not (cfg.api_key and cfg.api_secret):
+        return {
+            "ok": False,
+            "error": "Немає EXCHANGE_API_KEY / EXCHANGE_API_SECRET у .env",
+            "total": None,
+            "free": None,
+            "used": None,
+            "testnet": bool(cfg.testnet),
+        }
+    exchange_cls = getattr(ccxt, cfg.id, None)
+    if exchange_cls is None:
+        return {"ok": False, "error": f"Unknown exchange: {cfg.id}", "testnet": bool(cfg.testnet)}
+    ex = None
+    try:
+        ex = exchange_cls(
+            {
+                "apiKey": cfg.api_key,
+                "secret": cfg.api_secret,
+                "enableRateLimit": True,
+                "options": {"defaultType": cfg.default_type or "swap"},
+            }
+        )
+        if cfg.testnet:
+            try:
+                ex.set_sandbox_mode(True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Sandbox mode: %s", exc)
+        bal = ex.fetch_balance()
+        usdt = bal.get("USDT") or {}
+        free = float(usdt.get("free") or bal.get("free", {}).get("USDT") or 0.0)
+        used = float(usdt.get("used") or bal.get("used", {}).get("USDT") or 0.0)
+        total = usdt.get("total")
+        if total is not None:
+            total_f = float(total)
+        else:
+            total_f = free + used
+        return {
+            "ok": True,
+            "total": total_f,
+            "free": free,
+            "used": used,
+            "testnet": bool(cfg.testnet),
+            "exchange": cfg.id,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_futures_usdt_snapshot failed: %s", exc)
+        return {
+            "ok": False,
+            "error": str(exc),
+            "total": None,
+            "free": None,
+            "used": None,
+            "testnet": bool(cfg.testnet),
+        }
+    finally:
+        if ex is not None:
+            try:
+                ex.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 class CCXTExchange:
     def __init__(
         self,
