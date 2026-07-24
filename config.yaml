@@ -1,7 +1,7 @@
 mode: paper
 exchange:
   id: binanceusdm
-  testnet: true
+  testnet: false
   api_key: ${EXCHANGE_API_KEY}
   api_secret: ${EXCHANGE_API_SECRET}
   enable_rate_limit: true
