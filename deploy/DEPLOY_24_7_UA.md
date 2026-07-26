@@ -77,10 +77,17 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-nano .env   # EXCHANGE_API_KEY, EXCHANGE_API_SECRET, DASHBOARD_PASSWORD
+nano .env   # EXCHANGE_API_KEY, EXCHANGE_API_SECRET, DASHBOARD_PASSWORD, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 ```
 
 Обовʼязково задайте **`DASHBOARD_PASSWORD`** — без нього dashboard на `0.0.0.0:8080` відкритий для всіх.
+
+### Telegram (безкоштовно)
+
+1. @BotFather → `/newbot` → скопіюйте токен у `TELEGRAM_BOT_TOKEN`
+2. Напишіть боту `/start`
+3. Відкрийте `https://api.telegram.org/bot<TOKEN>/getUpdates` і знайдіть `"chat":{"id": ...}` → `TELEGRAM_CHAT_ID`
+4. Після `systemctl restart` бот шле повідомлення на: відкриття, DCA, закриття (TP), помилки ордерів
 
 Перевірка одного циклу:
 

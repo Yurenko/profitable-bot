@@ -10,7 +10,7 @@ WorkingDirectory=/home/ubuntu/profitable-bot
 Environment=PATH=/home/ubuntu/profitable-bot/.venv/bin:/usr/bin
 EnvironmentFile=-/home/ubuntu/profitable-bot/.env
 ExecStart=/home/ubuntu/profitable-bot/.venv/bin/python main.py dashboard --host 0.0.0.0 --port 8080 --no-browser
-Restart=on-failure
+Restart=always
 RestartSec=10
 
 [Install]

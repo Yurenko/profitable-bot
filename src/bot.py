@@ -19,6 +19,7 @@ from src.filters import (
 )
 from src.indicators import enrich_ohlcv
 from src.news.calendar import EconomicCalendar
+from src.notify.telegram import TelegramNotifier
 from src.position import Position
 from src.risk_manager import RiskManager
 from src.state.store import StateStore
@@ -41,10 +42,18 @@ class TradingBot:
         self.calendar = calendar or EconomicCalendar(cfg.news)
         self.risk = RiskManager(cfg.strategy, cfg.risk)
         self.strategy = MeanReversionDCAStrategy(cfg.strategy, self.risk)
+        self.notify = TelegramNotifier()
         self.positions: dict[str, Position] = {}
         self._running = False
         self._close_prices: dict[str, pd.Series] = {}
         self._oi_history: dict[str, list[float]] = {}
+
+        if self.notify.enabled:
+            logger.info("Telegram notifications enabled (chat_id set)")
+        else:
+            logger.info(
+                "Telegram notifications disabled — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env"
+            )
 
         # Restore persistent state, but drop positions for symbols no longer in config
         all_positions = store.load_positions()
@@ -278,6 +287,27 @@ class TradingBot:
                     avg_entry=pos_now.avg_entry,
                     dca_level=pos_now.dca_level,
                 )
+                margin = float(getattr(pos_now, "margin", 0) or 0) or None
+                if action_type == ActionType.ENTER:
+                    self.notify.notify_enter(
+                        symbol=symbol,
+                        price=fill_price,
+                        qty=fill_qty,
+                        avg_entry=pos_now.avg_entry,
+                        dca_level=pos_now.dca_level,
+                        mode=self.cfg.mode,
+                        margin=float(size.margin) if size else margin,
+                    )
+                else:
+                    self.notify.notify_dca(
+                        symbol=symbol,
+                        price=fill_price,
+                        qty=fill_qty,
+                        avg_entry=pos_now.avg_entry,
+                        dca_level=pos_now.dca_level,
+                        mode=self.cfg.mode,
+                        margin=float(size.margin) if size else margin,
+                    )
 
             elif action_type in (
                 ActionType.FULL_TP,
@@ -344,6 +374,15 @@ class TradingBot:
                     avg_entry=avg_before,
                     pnl=pnl,
                 )
+                self.notify.notify_close(
+                    symbol=symbol,
+                    action=action_type.value,
+                    price=fill_price,
+                    qty=fill_qty,
+                    avg_entry=avg_before,
+                    pnl=pnl,
+                    mode=self.cfg.mode,
+                )
                 # After full TP — never permanently block the next entry due to past Max DD
                 if action_type in (ActionType.FULL_TP, ActionType.TRAIL_EXIT):
                     if symbol not in self.positions or not self.positions[symbol].is_open:
@@ -361,12 +400,18 @@ class TradingBot:
                 if symbol in self.positions:
                     self.store.save_position(self.positions[symbol])
                 self.store.audit("margin_topup", symbol=symbol, amount=amount)
+                self.notify.notify_margin_topup(
+                    symbol=symbol, amount=float(amount), mode=self.cfg.mode
+                )
 
             self.store.update_order_status(coid, "filled")
         except Exception as exc:  # noqa: BLE001
             self.store.update_order_status(coid, "error")
             self.store.audit("order_error", symbol=symbol, error=str(exc), coid=coid)
             logger.exception("Order execution failed: %s", exc)
+            self.notify.notify_order_error(
+                symbol=symbol, error=str(exc), mode=self.cfg.mode
+            )
 
     def process_symbol(self, symbol: str) -> None:
         snap = self.build_snapshot(symbol)

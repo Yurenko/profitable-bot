@@ -97,7 +97,12 @@ class BotManager:
             pass
 
     def ensure_started(self, *, default_mode: str = "paper") -> None:
-        """Auto-start bot if persisted intent says it should be running."""
+        """Auto-start bot if persisted intent says it should be running.
+
+        After systemd restart / OOM the in-memory thread dies; SQLite still has
+        bot_active=true. Resume with the same mode. For live mainnet we pass
+        mainnet_ok=True because the user already confirmed when they clicked Live.
+        """
         if self.is_running():
             return
         try:
@@ -107,9 +112,24 @@ class BotManager:
             mode = store.get_kv("bot_mode", default_mode)
             if not active or not mode:
                 return
-            # start() acquires _lock internally; don't call it while holding _lock here
-            self.start(str(mode), mainnet_ok=False)
-        except Exception:  # noqa: BLE001
+            mode_s = str(mode)
+            # User already confirmed mainnet risk on the original Live click
+            result = self.start(mode_s, mainnet_ok=(mode_s == "live"))
+            if not result.get("ok"):
+                err = result.get("error", "unknown")
+                logger.error("Auto-resume bot failed mode=%s: %s", mode_s, err)
+                try:
+                    store.audit("auto_resume_failed", mode=mode_s, error=err)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                logger.info("Auto-resumed bot mode=%s after process restart", mode_s)
+                try:
+                    store.audit("auto_resume_ok", mode=mode_s)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("ensure_started failed: %s", exc)
             return
 
     def is_running(self) -> bool:
