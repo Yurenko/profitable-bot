@@ -183,6 +183,67 @@ class TradingBot:
         self.store.save_equity(sane)
         return sane
 
+    def _topup_remaining_margin(self, symbol: str, *, reason: str = "topup") -> float:
+        """Add free USDT (minus reserve) to isolated position margin — lowers liq price."""
+        if not self.cfg.strategy.post_entry_add_all_margin and reason == "post_enter":
+            return 0.0
+        if reason == "while_open" and not self.cfg.strategy.topup_free_while_open:
+            return 0.0
+        reserve = max(0.0, float(self.cfg.strategy.margin_reserve_usdt))
+        min_add = 0.5  # Binance dust / avoid spam
+        try:
+            free = float(self.exchange.fetch_free_usdt())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fetch_free_usdt for margin topup failed: %s", exc)
+            return 0.0
+        amount = free - reserve
+        if amount < min_add:
+            return 0.0
+        # Round down to 2 decimals (USDT)
+        amount = float(int(amount * 100) / 100)
+        if amount < min_add:
+            return 0.0
+        try:
+            self.exchange.add_margin(symbol, amount)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("add_margin %.2f to %s failed: %s", amount, symbol, exc)
+            self.store.audit("margin_topup_error", symbol=symbol, amount=amount, error=str(exc))
+            return 0.0
+
+        pos = self.positions.get(symbol)
+        if pos is not None:
+            try:
+                pos.add_margin(amount)
+                self.store.save_position(pos)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("local pos add_margin: %s", exc)
+        elif hasattr(self.exchange, "account") and symbol in getattr(
+            self.exchange.account, "positions", {}
+        ):
+            self.positions[symbol] = self.exchange.account.positions[symbol]
+            self.store.save_position(self.positions[symbol])
+
+        self.store.audit(
+            "margin_topup_all_free",
+            symbol=symbol,
+            amount=amount,
+            free_before=free,
+            reserve=reserve,
+            reason=reason,
+        )
+        self.notify.notify_margin_topup(
+            symbol=symbol, amount=amount, mode=self.cfg.mode
+        )
+        logger.info(
+            "%s added remaining margin $%.2f (free was %.2f, reserve %.2f) reason=%s",
+            symbol,
+            amount,
+            free,
+            reserve,
+            reason,
+        )
+        return amount
+
     def _execute(self, symbol: str, action_type: ActionType, decision: Any, snap: MarketSnapshot) -> None:
         coid = self._client_order_id(symbol, action_type.value)
         if not self.store.register_order(
@@ -257,6 +318,10 @@ class TradingBot:
                                 )
                             except Exception as exc:  # noqa: BLE001
                                 logger.warning("Limit place failed L%s: %s", lv.level, exc)
+
+                # After enter (+ grid): move remaining free USDT into isolated margin
+                if action_type == ActionType.ENTER and self.cfg.strategy.post_entry_add_all_margin:
+                    self._topup_remaining_margin(symbol, reason="post_enter")
 
                 fill_price = float(order.get("price") or snap.price)
                 fill_qty = float(order.get("amount") or size.qty)
@@ -440,6 +505,13 @@ class TradingBot:
             corr_ok, corr_reason = fr.allowed, ";".join(fr.reasons)
 
         pos = self.positions.get(symbol)
+        # Existing open position: pour leftover free USDT into margin (e.g. after restart)
+        if pos is not None and pos.is_open and self.cfg.strategy.topup_free_while_open:
+            try:
+                self._topup_remaining_margin(symbol, reason="while_open")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("while_open margin topup: %s", exc)
+
         decision = self.strategy.decide(
             snap,
             pos,

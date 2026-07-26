@@ -320,9 +320,8 @@ class CCXTExchange:
         return self._call("create_order", symbol, "limit", side, amount, price, params)
 
     def add_margin(self, symbol: str, amount: float) -> Any:
-        try:
-            if hasattr(self.client, "add_margin"):
-                return self._call("add_margin", symbol, amount)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("add_margin failed: %s", exc)
-        return None
+        if amount <= 0:
+            return None
+        if not hasattr(self.client, "add_margin"):
+            raise ExchangeError("add_margin not supported by exchange client")
+        return self._call("add_margin", symbol, amount)

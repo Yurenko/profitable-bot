@@ -66,6 +66,12 @@ class StrategyConfig:
     atr_sizing_ref_pct: float = 0.005
     min_equity_pct: float = 0.005
     max_equity_pct: float = 0.015
+    # After enter (+ grid limits): pour remaining free USDT into isolated margin
+    # to push liquidation further away. Reserve a little for fees/dust.
+    post_entry_add_all_margin: bool = True
+    margin_reserve_usdt: float = 1.0
+    # Also top up when an open position has free wallet balance above reserve
+    topup_free_while_open: bool = True
 
 
 @dataclass

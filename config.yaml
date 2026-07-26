@@ -47,6 +47,10 @@ strategy:
   atr_sizing_ref_pct: 0.005
   min_equity_pct: 0.01
   max_equity_pct: 0.03
+  # Після входу + сітки — всю вільну USDT у маржу позиції (далі від ліквідації)
+  post_entry_add_all_margin: true
+  margin_reserve_usdt: 1.0
+  topup_free_while_open: true
 risk:
   min_adverse_move_pct: 0.12
   margin_topup_buffer_pct: 0.03
