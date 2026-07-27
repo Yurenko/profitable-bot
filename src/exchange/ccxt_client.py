@@ -235,32 +235,28 @@ class CCXTExchange:
     def fetch_balance(self) -> dict[str, Any]:
         return self._call("fetch_balance")
 
+    def fetch_available_usdt(self) -> float:
+        """Futures wallet available USDT (Дост. on Binance app) — for margin top-up."""
+        try:
+            acct = self.client.fapiPrivateV2GetAccount()
+            top = float(acct.get("availableBalance") or 0)
+            if top > 0:
+                return top
+            for a in acct.get("assets") or []:
+                if str(a.get("asset", "")).upper() == "USDT":
+                    return float(a.get("availableBalance") or 0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("fapiPrivateV2GetAccount availableBalance: %s", exc)
+        bal = self.fetch_balance()
+        usdt = bal.get("USDT") or {}
+        return float(usdt.get("free") or bal.get("free", {}).get("USDT") or 0.0)
+
     def fetch_free_usdt(self) -> float:
         if self._feed is not None:
             cached = self._feed.get_free_usdt()
             if cached is not None:
                 return float(cached)
-        bal = self.fetch_balance()
-        usdt = bal.get("USDT") or {}
-        return float(usdt.get("free") or bal.get("free", {}).get("USDT") or 0.0)
-
-    def fetch_futures_available_usdt(self) -> float:
-        """USDT available to transfer / add to isolated margin (FAPI wallet)."""
-        try:
-            acct = self._call("fapiPrivateV2GetAccount")
-            for asset in acct.get("assets") or []:
-                if str(asset.get("asset", "")).upper() == "USDT":
-                    return float(asset.get("availableBalance") or 0.0)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("fapiPrivateV2GetAccount availableBalance: %s", exc)
-        try:
-            rows = self._call("fapiPrivateV2GetBalance")
-            for row in rows or []:
-                if str(row.get("asset", "")).upper() == "USDT":
-                    return float(row.get("availableBalance") or row.get("withdrawAvailable") or 0.0)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("fapiPrivateV2GetBalance: %s", exc)
-        return self.fetch_free_usdt()
+        return self.fetch_available_usdt()
 
     def equity(self) -> float:
         """Wallet equity for live: USDT total (free+used) when available, else free."""
@@ -374,28 +370,34 @@ class CCXTExchange:
         return cancelled
 
     def add_margin(self, symbol: str, amount: float) -> Any:
-        """Add USDT to isolated position margin (Binance FAPI positionMargin type=1)."""
-        amt = float(amount)
+        """Add USDT to isolated position margin (lowers liquidation price)."""
+        if amount <= 0:
+            return None
+        amt = round(float(amount), 2)
         if amt <= 0:
             return None
+        self.client.load_markets()
         market = self.client.market(symbol)
-        sym = market["id"]
+        errors: list[str] = []
+
+        # 1) CCXT unified
         try:
-            precise = float(self.client.amount_to_precision(symbol, amt))
-        except Exception:  # noqa: BLE001
-            precise = float(int(amt * 100) / 100)
-        if precise <= 0:
-            return None
-        payload = {"symbol": sym, "amount": precise, "type": 1}
-        try:
-            return self._call("fapiPrivatePostPositionmargin", payload)
+            if self.client.has.get("addMargin"):
+                return self._call("add_margin", symbol, amt)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "fapiPrivatePostPositionmargin %s %.4f failed: %s — trying add_margin",
-                sym,
-                precise,
-                exc,
+            errors.append(f"add_margin: {exc}")
+
+        # 2) Binance USDM POST /fapi/v1/positionMargin (isolated, one-way BOTH)
+        try:
+            return self._call(
+                "fapiPrivatePostPositionMargin",
+                {
+                    "symbol": market["id"],
+                    "amount": amt,
+                    "positionSide": "BOTH",
+                    "type": 1,
+                },
             )
-            if hasattr(self.client, "add_margin"):
-                return self._call("add_margin", symbol, precise)
-            raise ExchangeError(f"add_margin failed: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"fapi positionMargin: {exc}")
+            raise ExchangeError("; ".join(errors)) from exc

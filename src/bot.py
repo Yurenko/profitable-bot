@@ -185,15 +185,6 @@ class TradingBot:
         self.store.save_equity(sane)
         return sane
 
-    def _wallet_free_usdt(self) -> float:
-        """Free USDT on futures wallet (for margin top-up)."""
-        if hasattr(self.exchange, "fetch_futures_available_usdt"):
-            try:
-                return float(self.exchange.fetch_futures_available_usdt())
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("fetch_futures_available_usdt: %s", exc)
-        return float(self.exchange.fetch_free_usdt())
-
     def _topup_remaining_margin(self, symbol: str, *, reason: str = "topup") -> float:
         """Add free USDT (minus reserve) to isolated position margin — lowers liq price."""
         if not self.cfg.strategy.post_entry_add_all_margin and reason == "post_enter":
@@ -202,14 +193,20 @@ class TradingBot:
             return 0.0
         reserve = max(0.0, float(self.cfg.strategy.margin_reserve_usdt))
         min_add = 0.5  # Binance dust / avoid spam
-        try:
-            free = self._wallet_free_usdt()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("wallet free USDT for margin topup failed: %s", exc)
-            return 0.0
+
+        def _free_usdt() -> float:
+            if hasattr(self.exchange, "fetch_available_usdt"):
+                return float(self.exchange.fetch_available_usdt())
+            return float(self.exchange.fetch_free_usdt())
+
+        # Brief pause after grid limits so Binance updates available balance
+        if reason == "post_enter":
+            time.sleep(1.0)
+
+        free = _free_usdt()
         amount = free - reserve
         if amount < min_add:
-            logger.debug(
+            logger.info(
                 "%s margin topup skip reason=%s free=%.2f reserve=%.2f",
                 symbol,
                 reason,
@@ -217,7 +214,6 @@ class TradingBot:
                 reserve,
             )
             return 0.0
-        # Round down to 2 decimals (USDT)
         amount = float(int(amount * 100) / 100)
         if amount < min_add:
             return 0.0
@@ -228,7 +224,7 @@ class TradingBot:
             self.store.audit("margin_topup_error", symbol=symbol, amount=amount, error=str(exc))
             try:
                 self.notify.send(
-                    f"⚠️ Не вдалось додати маржу\n{symbol}\n${amount:.2f}\n{exc}"
+                    f"⚠️ Не вдалось додати маржу {symbol}\n${amount:.2f}\n{exc}"
                 )
             except Exception:  # noqa: BLE001
                 pass

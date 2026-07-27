@@ -1,7 +1,7 @@
 """Remaining free USDT → isolated margin after enter."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from src.bot import TradingBot
 from src.config import AppConfig, StrategyConfig
@@ -20,6 +20,7 @@ def _bot(*, free: float = 12.0) -> TradingBot:
     store.last_equity.return_value = 0.0
     ex = MagicMock()
     ex.fetch_free_usdt.return_value = free
+    ex.fetch_available_usdt.return_value = free
     ex.add_margin.return_value = {"ok": True}
     bot = TradingBot(cfg, exchange=ex, store=store)
     bot.notify = MagicMock()
@@ -31,8 +32,10 @@ def test_topup_adds_free_minus_reserve():
     pos = Position(symbol="SOL/USDT:USDT", leverage=5)
     pos.add(74.0, 0.1, 5.0)
     bot.positions["SOL/USDT:USDT"] = pos
-    added = bot._topup_remaining_margin("SOL/USDT:USDT", reason="post_enter")
+    with patch("src.bot.time.sleep"):
+        added = bot._topup_remaining_margin("SOL/USDT:USDT", reason="post_enter")
     assert abs(added - 11.34) < 1e-9
+    bot.exchange.fetch_available_usdt.assert_called()
     bot.exchange.add_margin.assert_called_once_with("SOL/USDT:USDT", 11.34)
     assert abs(pos.margin - (5.0 + 11.34)) < 1e-9
 
