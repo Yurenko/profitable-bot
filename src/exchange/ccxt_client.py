@@ -244,6 +244,24 @@ class CCXTExchange:
         usdt = bal.get("USDT") or {}
         return float(usdt.get("free") or bal.get("free", {}).get("USDT") or 0.0)
 
+    def fetch_futures_available_usdt(self) -> float:
+        """USDT available to transfer / add to isolated margin (FAPI wallet)."""
+        try:
+            acct = self._call("fapiPrivateV2GetAccount")
+            for asset in acct.get("assets") or []:
+                if str(asset.get("asset", "")).upper() == "USDT":
+                    return float(asset.get("availableBalance") or 0.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("fapiPrivateV2GetAccount availableBalance: %s", exc)
+        try:
+            rows = self._call("fapiPrivateV2GetBalance")
+            for row in rows or []:
+                if str(row.get("asset", "")).upper() == "USDT":
+                    return float(row.get("availableBalance") or row.get("withdrawAvailable") or 0.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("fapiPrivateV2GetBalance: %s", exc)
+        return self.fetch_free_usdt()
+
     def equity(self) -> float:
         """Wallet equity for live: USDT total (free+used) when available, else free."""
         try:
@@ -356,8 +374,28 @@ class CCXTExchange:
         return cancelled
 
     def add_margin(self, symbol: str, amount: float) -> Any:
-        if amount <= 0:
+        """Add USDT to isolated position margin (Binance FAPI positionMargin type=1)."""
+        amt = float(amount)
+        if amt <= 0:
             return None
-        if not hasattr(self.client, "add_margin"):
-            raise ExchangeError("add_margin not supported by exchange client")
-        return self._call("add_margin", symbol, amount)
+        market = self.client.market(symbol)
+        sym = market["id"]
+        try:
+            precise = float(self.client.amount_to_precision(symbol, amt))
+        except Exception:  # noqa: BLE001
+            precise = float(int(amt * 100) / 100)
+        if precise <= 0:
+            return None
+        payload = {"symbol": sym, "amount": precise, "type": 1}
+        try:
+            return self._call("fapiPrivatePostPositionmargin", payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "fapiPrivatePostPositionmargin %s %.4f failed: %s — trying add_margin",
+                sym,
+                precise,
+                exc,
+            )
+            if hasattr(self.client, "add_margin"):
+                return self._call("add_margin", symbol, precise)
+            raise ExchangeError(f"add_margin failed: {exc}") from exc
