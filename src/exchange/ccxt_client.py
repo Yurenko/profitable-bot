@@ -319,6 +319,42 @@ class CCXTExchange:
         params = params or {}
         return self._call("create_order", symbol, "limit", side, amount, price, params)
 
+    def cancel_open_orders(self, symbol: str) -> int:
+        """Cancel all open orders for symbol (DCA grid). Returns cancelled count."""
+        try:
+            before = self._call("fetch_open_orders", symbol) or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fetch_open_orders(%s) failed: %s", symbol, exc)
+            before = []
+
+        if not before:
+            # Still try cancel_all in case fetch failed but orders exist
+            try:
+                if self.client.has.get("cancelAllOrders"):
+                    self._call("cancel_all_orders", symbol)
+            except Exception:  # noqa: BLE001
+                pass
+            return 0
+
+        try:
+            if self.client.has.get("cancelAllOrders"):
+                self._call("cancel_all_orders", symbol)
+                return len(before)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cancel_all_orders(%s) failed, trying one-by-one: %s", symbol, exc)
+
+        cancelled = 0
+        for o in before:
+            oid = o.get("id")
+            if not oid:
+                continue
+            try:
+                self._call("cancel_order", oid, symbol)
+                cancelled += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cancel_order %s %s: %s", symbol, oid, exc)
+        return cancelled
+
     def add_margin(self, symbol: str, amount: float) -> Any:
         if amount <= 0:
             return None

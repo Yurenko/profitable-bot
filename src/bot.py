@@ -47,6 +47,8 @@ class TradingBot:
         self._running = False
         self._close_prices: dict[str, pd.Series] = {}
         self._oi_history: dict[str, list[float]] = {}
+        # Symbols for which we already cancelled leftover limits while flat
+        self._flat_limits_cleared: set[str] = set()
 
         if self.notify.enabled:
             logger.info("Telegram notifications enabled (chat_id set)")
@@ -244,6 +246,36 @@ class TradingBot:
         )
         return amount
 
+    def _cancel_open_limits(self, symbol: str, *, reason: str = "close") -> int:
+        """Cancel resting DCA/limit orders for symbol (frees locked margin)."""
+        if not hasattr(self.exchange, "cancel_open_orders"):
+            return 0
+        try:
+            n = int(self.exchange.cancel_open_orders(symbol) or 0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cancel_open_orders %s failed: %s", symbol, exc)
+            self.store.audit("limits_cancel_error", symbol=symbol, error=str(exc), reason=reason)
+            return 0
+        if n > 0 or reason in ("close", "flat_cleanup"):
+            self.store.audit("limits_cancelled", symbol=symbol, count=n, reason=reason)
+            logger.info("%s cancelled %s open limit(s) reason=%s", symbol, n, reason)
+            if n > 0:
+                try:
+                    self.notify.send(
+                        "\n".join(
+                            [
+                                "🧹 Скасовано лімітні ордери",
+                                f"Монета: {symbol}",
+                                f"Кількість: {n}",
+                                f"Причина: {reason}",
+                                f"Режим: {self.cfg.mode}",
+                            ]
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        return n
+
     def _execute(self, symbol: str, action_type: ActionType, decision: Any, snap: MarketSnapshot) -> None:
         coid = self._client_order_id(symbol, action_type.value)
         if not self.store.register_order(
@@ -322,6 +354,8 @@ class TradingBot:
                 # After enter (+ grid): move remaining free USDT into isolated margin
                 if action_type == ActionType.ENTER and self.cfg.strategy.post_entry_add_all_margin:
                     self._topup_remaining_margin(symbol, reason="post_enter")
+                if action_type == ActionType.ENTER:
+                    self._flat_limits_cleared.discard(symbol)
 
                 fill_price = float(order.get("price") or snap.price)
                 fill_qty = float(order.get("amount") or size.qty)
@@ -448,9 +482,16 @@ class TradingBot:
                     pnl=pnl,
                     mode=self.cfg.mode,
                 )
+                # Full close → cancel leftover DCA limit orders (free locked USDT)
+                pos_still_open = (
+                    symbol in self.positions and self.positions[symbol].is_open
+                )
+                if not pos_still_open:
+                    self._cancel_open_limits(symbol, reason="close")
+                    self._flat_limits_cleared.add(symbol)
                 # After full TP — never permanently block the next entry due to past Max DD
                 if action_type in (ActionType.FULL_TP, ActionType.TRAIL_EXIT):
-                    if symbol not in self.positions or not self.positions[symbol].is_open:
+                    if not pos_still_open:
                         self.risk.resume_after_take_profit(self._equity())
                         self.store.audit("risk_resume_after_tp", equity=self._equity())
 
@@ -505,12 +546,19 @@ class TradingBot:
             corr_ok, corr_reason = fr.allowed, ";".join(fr.reasons)
 
         pos = self.positions.get(symbol)
-        # Existing open position: pour leftover free USDT into margin (e.g. after restart)
-        if pos is not None and pos.is_open and self.cfg.strategy.topup_free_while_open:
-            try:
-                self._topup_remaining_margin(symbol, reason="while_open")
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("while_open margin topup: %s", exc)
+        # No open position → cancel orphaned DCA limits once (e.g. after TP before this fix)
+        if pos is None or not pos.is_open:
+            if symbol not in self._flat_limits_cleared:
+                self._cancel_open_limits(symbol, reason="flat_cleanup")
+                self._flat_limits_cleared.add(symbol)
+        else:
+            self._flat_limits_cleared.discard(symbol)
+            # Existing open position: pour leftover free USDT into margin (e.g. after restart)
+            if self.cfg.strategy.topup_free_while_open:
+                try:
+                    self._topup_remaining_margin(symbol, reason="while_open")
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("while_open margin topup: %s", exc)
 
         decision = self.strategy.decide(
             snap,
