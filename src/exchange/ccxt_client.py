@@ -333,6 +333,15 @@ class CCXTExchange:
         params = params or {}
         return self._call("create_order", symbol, "limit", side, amount, price, params)
 
+    def fetch_open_orders(self, symbol: str) -> list[dict[str, Any]]:
+        return list(self._call("fetch_open_orders", symbol) or [])
+
+    def fetch_order(
+        self, order_id: str, symbol: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        params = params or {}
+        return self._call("fetch_order", order_id, symbol, params)
+
     def cancel_open_orders(self, symbol: str) -> int:
         """Cancel all open orders for symbol (DCA grid). Returns cancelled count."""
         try:

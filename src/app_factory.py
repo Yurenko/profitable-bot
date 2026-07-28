@@ -140,6 +140,10 @@ def create_hybrid_paper(cfg: AppConfig, store: StateStore) -> tuple[object, Pape
                 "info": {"paper": True, "note": "pending_until_price_hit"},
             }
 
+        def fetch_open_orders(self, symbol):
+            # Paper limits are virtual — strategy fills by price, not exchange sync
+            return []
+
         def cancel_open_orders(self, symbol):
             # Paper limits are not resting on an exchange
             return 0

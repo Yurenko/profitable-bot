@@ -294,6 +294,234 @@ class TradingBot:
                     pass
         return n
 
+    @staticmethod
+    def _order_matches_grid_level(order: dict[str, Any], level: dict[str, Any]) -> bool:
+        """Match resting buy limit to a planned grid level by price (+ optional qty)."""
+        try:
+            op = float(order.get("price") or 0)
+            lp = float(level.get("price") or 0)
+        except (TypeError, ValueError):
+            return False
+        if op <= 0 or lp <= 0:
+            return False
+        if abs(op - lp) / lp > 0.0025:  # ~0.25%
+            return False
+        try:
+            oq = float(order.get("amount") or order.get("remaining") or 0)
+            lq = float(level.get("qty") or 0)
+            if oq > 0 and lq > 0 and abs(oq - lq) / lq > 0.25:
+                return False
+        except (TypeError, ValueError):
+            pass
+        return True
+
+    def _apply_grid_limit_fill(
+        self,
+        symbol: str,
+        level: dict[str, Any],
+        *,
+        fill_price: float | None = None,
+        fill_qty: float | None = None,
+        client_order_id: str | None = None,
+        order_id: str | None = None,
+    ) -> bool:
+        """Record a filled DCA limit into local position + trade history."""
+        pos = self.positions.get(symbol)
+        if pos is None or not pos.is_open:
+            return False
+        price = float(fill_price if fill_price is not None else level.get("price") or 0)
+        qty = float(fill_qty if fill_qty is not None else level.get("qty") or 0)
+        if price <= 0 or qty <= 0:
+            return False
+
+        margin = (qty * price) / max(1, int(self.cfg.strategy.leverage))
+        fee = qty * price * float(self.cfg.risk.maker_fee)
+        pos.add(price, qty, margin, fee=fee, is_dca=True)
+        level["filled"] = True
+        if client_order_id:
+            level["clientOrderId"] = client_order_id
+        if order_id:
+            level["orderId"] = order_id
+        pos.meta.setdefault("grid", {})["limits_live"] = True
+        self.store.save_position(pos)
+
+        coid = client_order_id or self._client_order_id(symbol, f"grid{level.get('level', 0)}")
+        self.store.register_order(coid, symbol, "dca", {"source": "grid_limit_fill"})
+        self.store.update_order_status(coid, "filled")
+        self.store.record_trade(
+            symbol=symbol,
+            side="buy",
+            action="dca",
+            price=price,
+            qty=qty,
+            fee=fee,
+            avg_entry=pos.avg_entry,
+            dca_level=pos.dca_level,
+            mode=self.cfg.mode,
+            client_order_id=coid,
+        )
+        self.store.audit(
+            "grid_fill",
+            symbol=symbol,
+            level=level.get("level"),
+            price=price,
+            qty=qty,
+            avg_entry=pos.avg_entry,
+            dca_level=pos.dca_level,
+            order_id=order_id,
+            client_order_id=coid,
+        )
+        self.notify.notify_dca(
+            symbol=symbol,
+            price=price,
+            qty=qty,
+            avg_entry=pos.avg_entry,
+            dca_level=pos.dca_level,
+            mode=self.cfg.mode,
+            margin=margin,
+        )
+        logger.info(
+            "%s grid limit fill L%s price=%.4f qty=%.6f dca=%s avg=%.4f",
+            symbol,
+            level.get("level"),
+            price,
+            qty,
+            pos.dca_level,
+            pos.avg_entry,
+        )
+        return True
+
+    def _sync_grid_limit_fills(self, symbol: str) -> int:
+        """Detect Binance-filled DCA limits and sync local position (no market rebuy).
+
+        When limits are live on the exchange, strategy waits (HOLD). This method is
+        the only path that advances dca_level for those fills.
+        """
+        if self.cfg.strategy.dca_mode != "grid":
+            return 0
+        pos = self.positions.get(symbol)
+        if pos is None or not pos.is_open:
+            return 0
+        grid = pos.meta.get("grid") or {}
+        levels = grid.get("levels") or []
+        if not levels:
+            return 0
+        if not hasattr(self.exchange, "fetch_open_orders"):
+            return 0
+
+        try:
+            open_orders = self.exchange.fetch_open_orders(symbol) or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fetch_open_orders for grid sync failed: %s", exc)
+            return 0
+
+        buy_limits: list[dict[str, Any]] = []
+        for o in open_orders:
+            side = str(o.get("side") or "").lower()
+            typ = str(o.get("type") or "").lower()
+            status = str(o.get("status") or "").lower()
+            if side != "buy":
+                continue
+            if typ and typ not in ("limit", "limit_maker"):
+                # Some exchanges omit type; keep if price is set
+                if o.get("price") is None:
+                    continue
+            if status in ("canceled", "cancelled", "rejected", "expired"):
+                continue
+            buy_limits.append(o)
+
+        # Retroactively mark limits_live if resting grid orders are present
+        if buy_limits and not grid.get("limits_live"):
+            matched_any = any(
+                self._order_matches_grid_level(o, lv)
+                for o in buy_limits
+                for lv in levels
+                if not lv.get("filled")
+            )
+            if matched_any:
+                grid["limits_live"] = True
+                pos.meta["grid"] = grid
+                self.store.save_position(pos)
+
+        if not grid.get("limits_live") and self.cfg.mode != "live":
+            return 0
+
+        # If we have resting buy limits matching the grid, treat as live even without flag
+        if buy_limits and not grid.get("limits_live"):
+            # No match to grid — nothing to sync
+            return 0
+
+        applied = 0
+        # Process sequential unfilled levels only
+        while True:
+            adds_done = max(0, pos.dca_level - 1)
+            if adds_done >= len(levels) or pos.dca_level >= self.cfg.strategy.max_dca_levels:
+                break
+            level = levels[adds_done]
+            if level.get("filled"):
+                # Meta says filled but dca_level lagged — should not happen; advance carefully
+                break
+
+            still_open = any(
+                self._order_matches_grid_level(o, level) for o in buy_limits
+            )
+            if still_open:
+                break
+
+            # Level not resting. Apply fill when:
+            # - we know limits were live / placed, OR
+            # - other grid buy limits are still open (implies this one filled), OR
+            # - stored order id can be fetched as closed/filled
+            can_infer = bool(grid.get("limits_live")) or bool(buy_limits)
+            if not can_infer:
+                break
+
+            fill_price = float(level.get("price") or 0)
+            fill_qty = float(level.get("qty") or 0)
+            order_id = level.get("orderId") or None
+            coid = level.get("clientOrderId") or None
+
+            # Prefer exchange fill details when we have an order id
+            if order_id and hasattr(self.exchange, "fetch_order"):
+                try:
+                    od = self.exchange.fetch_order(str(order_id), symbol)
+                    st = str(od.get("status") or "").lower()
+                    if st in ("canceled", "cancelled", "rejected", "expired"):
+                        # Cancelled — don't invent a fill; mark skipped
+                        level["filled"] = False
+                        level["cancelled"] = True
+                        self.store.save_position(pos)
+                        break
+                    if st in ("closed", "filled"):
+                        fill_price = float(od.get("average") or od.get("price") or fill_price)
+                        filled = od.get("filled")
+                        if filled is not None and float(filled) > 0:
+                            fill_qty = float(filled)
+                        coid = od.get("clientOrderId") or coid
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("fetch_order for grid L%s: %s", level.get("level"), exc)
+
+            if self._apply_grid_limit_fill(
+                symbol,
+                level,
+                fill_price=fill_price,
+                fill_qty=fill_qty,
+                client_order_id=coid,
+                order_id=str(order_id) if order_id else None,
+            ):
+                applied += 1
+                # Refresh pos reference
+                pos = self.positions[symbol]
+                levels = pos.meta.get("grid", {}).get("levels") or levels
+            else:
+                break
+
+            # Safety: one inference chain per tick is fine; continue while consecutive fills
+            if applied >= 5:
+                break
+
+        return applied
+
     def _execute(self, symbol: str, action_type: ActionType, decision: Any, snap: MarketSnapshot) -> None:
         coid = self._client_order_id(symbol, action_type.value)
         if not self.store.register_order(
@@ -306,6 +534,20 @@ class TradingBot:
             if action_type in (ActionType.ENTER, ActionType.DCA):
                 size = decision.size
                 assert size is not None
+                # Live grid limits already on exchange — never market-buy the same DCA level
+                if (
+                    action_type == ActionType.DCA
+                    and self.cfg.strategy.dca_mode == "grid"
+                ):
+                    pos_chk = self.positions.get(symbol)
+                    if pos_chk and (pos_chk.meta.get("grid") or {}).get("limits_live"):
+                        logger.info(
+                            "%s skip market DCA — limits_live; syncing fills instead",
+                            symbol,
+                        )
+                        self.store.update_order_status(coid, "skipped_limits_live")
+                        self._sync_grid_limit_fills(symbol)
+                        return
                 self.exchange.set_leverage(symbol, self.cfg.strategy.leverage)
                 self.exchange.set_margin_mode(symbol, self.cfg.strategy.margin_mode)
                 if hasattr(self.exchange, "set_mark"):
@@ -357,17 +599,46 @@ class TradingBot:
                     )
                     # Best-effort: place real limit orders if exchange supports it
                     if hasattr(self.exchange, "create_limit_order"):
+                        placed_orders: list[dict[str, Any]] = []
                         for lv in plan.levels:
                             try:
-                                self.exchange.create_limit_order(
+                                coid_g = self._client_order_id(symbol, f"grid{lv.level}")
+                                o = self.exchange.create_limit_order(
                                     symbol,
                                     "buy",
                                     lv.qty,
                                     lv.price,
-                                    params={"clientOrderId": self._client_order_id(symbol, f"grid{lv.level}")},
+                                    params={"clientOrderId": coid_g},
                                 )
+                                placed_orders.append(
+                                    {
+                                        "level": lv.level,
+                                        "price": lv.price,
+                                        "qty": lv.qty,
+                                        "clientOrderId": coid_g,
+                                        "orderId": o.get("id"),
+                                        "status": o.get("status") or "open",
+                                    }
+                                )
+                                # Persist ids on level meta for later sync
+                                for meta_lv in pos.meta.get("grid", {}).get("levels", []):
+                                    if int(meta_lv.get("level", -1)) == int(lv.level):
+                                        meta_lv["clientOrderId"] = coid_g
+                                        if o.get("id"):
+                                            meta_lv["orderId"] = o.get("id")
+                                        break
                             except Exception as exc:  # noqa: BLE001
                                 logger.warning("Limit place failed L%s: %s", lv.level, exc)
+                        # Live: limits on exchange are source of truth — no market DCA
+                        if placed_orders and self.cfg.mode == "live":
+                            pos.meta["grid"]["limits_live"] = True
+                            pos.meta["grid"]["orders"] = placed_orders
+                            self.store.save_position(pos)
+                            self.store.audit(
+                                "grid_limits_placed",
+                                symbol=symbol,
+                                count=len(placed_orders),
+                            )
 
                 # After enter (+ grid): move remaining free USDT into isolated margin
                 if action_type == ActionType.ENTER and self.cfg.strategy.post_entry_add_all_margin:
@@ -571,6 +842,12 @@ class TradingBot:
                 self._flat_limits_cleared.add(symbol)
         else:
             self._flat_limits_cleared.discard(symbol)
+            # Sync filled DCA limits from exchange before strategy (avoids market rebuy)
+            try:
+                self._sync_grid_limit_fills(symbol)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("grid limit sync failed: %s", exc)
+            pos = self.positions.get(symbol)
             # Existing open position: pour leftover free USDT into margin (e.g. after restart)
             if self.cfg.strategy.topup_free_while_open:
                 try:

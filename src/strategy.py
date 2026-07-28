@@ -119,7 +119,15 @@ class MeanReversionDCAStrategy:
             return StrategyAction(ActionType.HOLD, reason="grid_complete")
 
         nxt = plan.levels[adds_done]
-        # Limit fills when price trades at/below planned level
+        # Live exchange already has resting limit orders — never market-DCA the same level
+        # (fills are applied by bot._sync_grid_limit_fills). Paper keeps price-hit market path.
+        if pos.meta.get("grid", {}).get("limits_live"):
+            return StrategyAction(
+                ActionType.HOLD,
+                reason=f"wait_grid_L{nxt.level}@{nxt.price:.4f}",
+            )
+
+        # Paper / no live limits: fill when price trades at/below planned level
         if snap.price > nxt.price:
             return StrategyAction(
                 ActionType.HOLD,
