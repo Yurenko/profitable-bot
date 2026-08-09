@@ -312,6 +312,54 @@ class CCXTExchange:
         except Exception as exc:  # noqa: BLE001
             logger.warning("set_margin_mode: %s", exc)
 
+    def amount_to_precision(self, symbol: str, amount: float) -> float:
+        """Round qty down to exchange step size (avoids Invalid quantity / oversell)."""
+        try:
+            self.client.load_markets()
+            raw = self.client.amount_to_precision(symbol, amount)
+            return float(raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("amount_to_precision %s: %s", symbol, exc)
+            return float(amount)
+
+    def fetch_position_qty(self, symbol: str) -> float:
+        """Signed net position qty: >0 long, <0 short, 0 flat."""
+        # 1) CCXT unified
+        try:
+            if self.client.has.get("fetchPositions"):
+                positions = self._call("fetch_positions", [symbol]) or []
+                for p in positions:
+                    psym = p.get("symbol")
+                    if psym and psym != symbol:
+                        continue
+                    info = p.get("info") or {}
+                    if "positionAmt" in info:
+                        return float(info.get("positionAmt") or 0)
+                    contracts = float(p.get("contracts") or 0)
+                    if contracts == 0:
+                        continue
+                    side = str(p.get("side") or "").lower()
+                    if side == "short":
+                        return -abs(contracts)
+                    return abs(contracts)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("fetch_positions qty: %s", exc)
+
+        # 2) Binance USDM positionRisk
+        try:
+            self.client.load_markets()
+            market = self.client.market(symbol)
+            rows = self.client.fapiPrivateV2GetPositionRisk({"symbol": market["id"]})
+            if isinstance(rows, dict):
+                rows = [rows]
+            for row in rows or []:
+                if str(row.get("symbol", "")).upper() != str(market["id"]).upper():
+                    continue
+                return float(row.get("positionAmt") or 0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("fapi positionRisk: %s", exc)
+        return 0.0
+
     def create_market_order(
         self,
         symbol: str,
@@ -319,8 +367,11 @@ class CCXTExchange:
         amount: float,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        params = params or {}
-        return self._call("create_order", symbol, "market", side, amount, None, params)
+        params = dict(params or {})
+        amt = self.amount_to_precision(symbol, float(amount))
+        if amt <= 0:
+            raise ExchangeError(f"amount rounds to zero for {symbol}: {amount}")
+        return self._call("create_order", symbol, "market", side, amt, None, params)
 
     def create_limit_order(
         self,

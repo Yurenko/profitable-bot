@@ -49,6 +49,7 @@ class TradingBot:
         self._oi_history: dict[str, list[float]] = {}
         # Symbols for which we already cancelled leftover limits while flat
         self._flat_limits_cleared: set[str] = set()
+        self._last_flatten_ts: dict[str, float] = {}
 
         if self.notify.enabled:
             logger.info("Telegram notifications enabled (chat_id set)")
@@ -522,6 +523,139 @@ class TradingBot:
 
         return applied
 
+    def _exchange_signed_qty(self, symbol: str) -> float | None:
+        """Live exchange net qty if available; None when unsupported (paper)."""
+        if not hasattr(self.exchange, "fetch_position_qty"):
+            return None
+        try:
+            return float(self.exchange.fetch_position_qty(symbol))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fetch_position_qty(%s) failed: %s", symbol, exc)
+            return None
+
+    def _close_qty_for_sell(self, symbol: str, requested: float) -> float:
+        """Qty to sell on close: never more than exchange long (prevents accidental short)."""
+        qty = float(requested or 0)
+        if qty <= 0:
+            return 0.0
+        ex_qty = self._exchange_signed_qty(symbol)
+        if ex_qty is None:
+            # Paper / no API — still cap to local position
+            pos = self.positions.get(symbol)
+            if pos is not None and pos.is_open:
+                qty = min(qty, float(pos.qty))
+            return qty
+        if ex_qty <= 0:
+            # Flat or already short — do not sell further
+            logger.warning(
+                "%s refuse sell: exchange qty=%.6f (requested=%.6f)",
+                symbol,
+                ex_qty,
+                requested,
+            )
+            return 0.0
+        capped = min(qty, ex_qty)
+        if capped + 1e-12 < qty:
+            logger.warning(
+                "%s close qty capped to exchange long: local/request=%.6f exchange=%.6f",
+                symbol,
+                qty,
+                ex_qty,
+            )
+        return capped
+
+    def _flatten_exchange_residual(self, symbol: str, *, reason: str = "residual") -> bool:
+        """If exchange still has long dust or an accidental short — close with reduceOnly.
+
+        Long-only bot must never leave a short. Called after TP and when local is flat.
+        """
+        if self.cfg.mode != "live":
+            return False
+        if not hasattr(self.exchange, "fetch_position_qty"):
+            return False
+        if not hasattr(self.exchange, "create_market_order"):
+            return False
+
+        ex_qty = self._exchange_signed_qty(symbol)
+        if ex_qty is None or abs(ex_qty) < 1e-12:
+            return False
+
+        # Round to market step
+        amt = abs(ex_qty)
+        if hasattr(self.exchange, "amount_to_precision"):
+            try:
+                amt = float(self.exchange.amount_to_precision(symbol, amt))
+            except Exception:  # noqa: BLE001
+                pass
+        if amt <= 0:
+            return False
+
+        side = "sell" if ex_qty > 0 else "buy"
+        coid = self._client_order_id(symbol, "flat" if side == "sell" else "unshort")
+        try:
+            if not self.store.register_order(
+                coid, symbol, side, {"decision": f"flatten_{reason}", "qty": amt}
+            ):
+                return False
+            order = self.exchange.create_market_order(
+                symbol,
+                side,
+                amt,
+                params={"clientOrderId": coid, "reduceOnly": True},
+            )
+            self.store.update_order_status(coid, "filled")
+            fill_price = float(order.get("price") or 0)
+            fill_qty = float(order.get("amount") or amt)
+            self.store.audit(
+                "exchange_flatten",
+                symbol=symbol,
+                reason=reason,
+                side=side,
+                qty=fill_qty,
+                price=fill_price,
+                exchange_qty_before=ex_qty,
+            )
+            try:
+                label = "залишок лонгу" if side == "sell" else "випадковий шорт"
+                self.notify.send(
+                    "\n".join(
+                        [
+                            f"🧹 Закрито {label} на біржі",
+                            f"Монета: {symbol}",
+                            f"Side: {side} {fill_qty:.6f}",
+                            f"Причина: {reason}",
+                            f"Режим: {self.cfg.mode}",
+                        ]
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            logger.warning(
+                "%s flattened exchange residual side=%s qty=%.6f reason=%s",
+                symbol,
+                side,
+                fill_qty,
+                reason,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("flatten residual %s failed: %s", symbol, exc)
+            self.store.audit(
+                "exchange_flatten_error",
+                symbol=symbol,
+                reason=reason,
+                error=str(exc),
+                exchange_qty=ex_qty,
+            )
+            try:
+                self.notify.send(
+                    f"⚠️ Не вдалось закрити залишок на біржі {symbol}\n"
+                    f"qty={ex_qty:.6f}\n{exc}"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+
     def _execute(self, symbol: str, action_type: ActionType, decision: Any, snap: MarketSnapshot) -> None:
         coid = self._client_order_id(symbol, action_type.value)
         if not self.store.register_order(
@@ -702,14 +836,34 @@ class TradingBot:
                 ActionType.TRAIL_EXIT,
                 ActionType.PARTIAL_TP,
             ):
-                qty = decision.close_qty
+                qty = self._close_qty_for_sell(symbol, float(decision.close_qty or 0))
+                if qty <= 0:
+                    logger.warning(
+                        "%s skip %s — nothing to sell on exchange (requested=%.6f)",
+                        symbol,
+                        action_type.value,
+                        float(decision.close_qty or 0),
+                    )
+                    self.store.update_order_status(coid, "skipped_no_exchange_long")
+                    # Local thinks open but exchange flat/short — clean local + flatten short
+                    if action_type != ActionType.PARTIAL_TP:
+                        self.positions.pop(symbol, None)
+                        self.store.delete_position(symbol)
+                        self._cancel_open_limits(symbol, reason="close")
+                        self._flat_limits_cleared.add(symbol)
+                        self._flatten_exchange_residual(symbol, reason="post_tp_no_long")
+                    return
                 pos_before = self.positions.get(symbol)
                 avg_before = float(pos_before.avg_entry) if pos_before else 0.0
                 dca_before = int(pos_before.dca_level) if pos_before else None
                 if hasattr(self.exchange, "set_mark"):
                     self.exchange.set_mark(symbol, snap.price)
+                # reduceOnly: never flip a long close into an accidental short
                 order = self.exchange.create_market_order(
-                    symbol, "sell", qty, params={"clientOrderId": coid}
+                    symbol,
+                    "sell",
+                    qty,
+                    params={"clientOrderId": coid, "reduceOnly": True},
                 )
                 fill_price = float(order.get("price") or snap.price)
                 fill_qty = float(order.get("amount") or qty or 0.0)
@@ -731,13 +885,20 @@ class TradingBot:
                         self.store.delete_position(symbol)
                 else:
                     pos = self.positions[symbol]
-                    pos.reduce(qty, snap.price, fee=fill_fee)
+                    # Reduce by what we actually sold (not inflated local request)
+                    reduce_qty = min(float(pos.qty), fill_qty if fill_qty > 0 else qty)
+                    pos.reduce(reduce_qty, snap.price, fee=fill_fee)
                     if action_type == ActionType.PARTIAL_TP and pos.is_open:
                         pos.partial_taken = True
                         self.store.save_position(pos)
                     else:
-                        self.positions.pop(symbol, None)
-                        self.store.delete_position(symbol)
+                        # Full close intent — drop local even if tiny dust left in bookkeeping
+                        if action_type != ActionType.PARTIAL_TP:
+                            self.positions.pop(symbol, None)
+                            self.store.delete_position(symbol)
+                        elif not pos.is_open:
+                            self.positions.pop(symbol, None)
+                            self.store.delete_position(symbol)
                 if symbol in self.positions and self.positions[symbol].is_open:
                     self.store.save_position(self.positions[symbol])
                 self.store.record_trade(
@@ -778,6 +939,8 @@ class TradingBot:
                 if not pos_still_open:
                     self._cancel_open_limits(symbol, reason="close")
                     self._flat_limits_cleared.add(symbol)
+                    # Safety: close any leftover long dust OR accidental short on exchange
+                    self._flatten_exchange_residual(symbol, reason="post_tp")
                 # After full TP — never permanently block the next entry due to past Max DD
                 if action_type in (ActionType.FULL_TP, ActionType.TRAIL_EXIT):
                     if not pos_still_open:
@@ -840,8 +1003,17 @@ class TradingBot:
             if symbol not in self._flat_limits_cleared:
                 self._cancel_open_limits(symbol, reason="flat_cleanup")
                 self._flat_limits_cleared.add(symbol)
+            # Local flat but exchange may still have dust long / accidental short
+            now = time.time()
+            if now - self._last_flatten_ts.get(symbol, 0.0) >= 15.0:
+                self._last_flatten_ts[symbol] = now
+                try:
+                    self._flatten_exchange_residual(symbol, reason="local_flat")
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("flatten while local flat: %s", exc)
         else:
             self._flat_limits_cleared.discard(symbol)
+            self._last_flatten_ts.pop(symbol, None)
             # Sync filled DCA limits from exchange before strategy (avoids market rebuy)
             try:
                 self._sync_grid_limit_fills(symbol)
