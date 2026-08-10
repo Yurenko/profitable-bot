@@ -82,7 +82,33 @@
           </div>
         </div>
 
-        <div class="card chart-card">
+        <div class="card" style="margin-top:1rem">
+          <div class="card-head"><h2>Статистика Live</h2></div>
+          <div class="grid stats" id="liveStatsGrid">
+            <div class="card stat">
+              <span class="label">Позицій відкрито</span>
+              <span class="value" id="liveStatOpened">0</span>
+              <span class="sub" id="liveStatOpenedSub">enter (live)</span>
+            </div>
+            <div class="card stat">
+              <span class="label">Закрито в плюс</span>
+              <span class="value" id="liveStatWins">0</span>
+              <span class="sub" id="liveStatWinsSub">—</span>
+            </div>
+            <div class="card stat">
+              <span class="label">Профіт (live)</span>
+              <span class="value" id="liveStatPnl">—</span>
+              <span class="sub" id="liveStatPnlSub">від депозиту біржі</span>
+            </div>
+            <div class="card stat">
+              <span class="label">Win rate</span>
+              <span class="value" id="liveStatWinRate">—</span>
+              <span class="sub" id="liveStatClosedSub">закритих позицій</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card chart-card" style="margin-top:1rem">
           <div class="card-head">
             <h2>Крива equity (paper / live / бектест)</h2>
             <p class="hint" id="equityChartHint">Під час роботи бота — з SQLite. Після бектесту — крива бектесту.</p>

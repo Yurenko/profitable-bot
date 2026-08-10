@@ -509,6 +509,12 @@ class BotManager:
                     }
                 )
         live_curve = store.equity_history(limit=300)
+        # Live trade stats (always from DB mode=live — useful even while viewing paper)
+        equity_ref = float(exchange_total) if exchange_total is not None else float(capital)
+        try:
+            live_stats = store.trade_stats(mode="live", equity_ref=equity_ref)
+        except Exception as exc:  # noqa: BLE001
+            live_stats = {"error": str(exc)}
         with self._lock:
             bt = self._backtest
             return {
@@ -523,6 +529,7 @@ class BotManager:
                 "initial_capital": capital,
                 "equity_points": live_curve,
                 "exchange_balance": exchange_bal,
+                "live_stats": live_stats,
                 "positions": pos_list,
                 "symbols": cfg.symbols,
                 "testnet": cfg.exchange.testnet,

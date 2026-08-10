@@ -160,6 +160,29 @@ function renderStatus(d) {
   $("#statTestnet").textContent = d.testnet ? "Так ✓" : "НІ ⚠";
   $("#statLastTick").textContent = d.last_tick ? fmtTsShort(d.last_tick) : "—";
 
+  // Live trade statistics (from SQLite mode=live)
+  const ls = d.live_stats || {};
+  const openedEl = document.getElementById("liveStatOpened");
+  if (openedEl && !ls.error) {
+    openedEl.textContent = String(ls.positions_opened ?? 0);
+    const wins = ls.wins ?? 0;
+    const closed = ls.positions_closed ?? 0;
+    const losses = ls.losses ?? 0;
+    $("#liveStatWins").textContent = String(wins);
+    $("#liveStatWinsSub").textContent =
+      closed > 0 ? `${wins} з ${closed} закритих · мінус: ${losses}` : "ще немає закриттів";
+    const pnl = Number(ls.total_pnl || 0);
+    const pnlPct = Number(ls.total_pnl_pct || 0);
+    const pnlEl = $("#liveStatPnl");
+    pnlEl.textContent = `${pnl >= 0 ? "+" : ""}${fmtUsd(pnl)}`;
+    pnlEl.className = "value " + (pnl >= 0 ? "positive" : "negative");
+    const ref = ls.equity_ref != null ? fmtUsd(ls.equity_ref) : "—";
+    $("#liveStatPnlSub").textContent = `${pnlPct >= 0 ? "+" : ""}${fmtPct(pnlPct)} від депозиту ${ref}`;
+    $("#liveStatWinRate").textContent = closed > 0 ? fmtPct(ls.win_rate || 0) : "—";
+    $("#liveStatClosedSub").textContent =
+      closed > 0 ? `${closed} повних закриттів (TP)` : "закритих позицій поки немає";
+  }
+
   const pill = $("#statusPill");
   if (d.bot_running) {
     pill.textContent = `● ${d.bot_mode}`;

@@ -253,6 +253,75 @@ class StateStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def trade_stats(
+        self,
+        *,
+        mode: str = "live",
+        equity_ref: float | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate closed-position stats for dashboard (live/paper).
+
+        - positions_opened: count of enter fills
+        - positions_closed: count of full closes (full_tp / trail_exit)
+        - wins / losses: closes with pnl > 0 / <= 0
+        - total_pnl: sum of close PnL (incl. partial_tp)
+        - total_pnl_pct: total_pnl / equity_ref (account ROI)
+        """
+        mode_s = (mode or "live").strip().lower()
+        close_full = ("full_tp", "trail_exit")
+        close_any = ("full_tp", "trail_exit", "partial_tp")
+
+        with self._db() as conn:
+            opened = conn.execute(
+                "SELECT COUNT(*) AS n FROM trades WHERE lower(coalesce(mode,''))=? AND action='enter'",
+                (mode_s,),
+            ).fetchone()["n"]
+            closed_rows = conn.execute(
+                "SELECT pnl, avg_entry, qty, notional FROM trades "
+                "WHERE lower(coalesce(mode,''))=? AND action IN (?, ?) "
+                "AND pnl IS NOT NULL",
+                (mode_s, *close_full),
+            ).fetchall()
+            pnl_rows = conn.execute(
+                "SELECT coalesce(SUM(pnl), 0) AS s FROM trades "
+                "WHERE lower(coalesce(mode,''))=? AND action IN (?, ?, ?) "
+                "AND pnl IS NOT NULL",
+                (mode_s, *close_any),
+            ).fetchone()
+
+        closed = len(closed_rows)
+        wins = sum(1 for r in closed_rows if float(r["pnl"] or 0) > 0)
+        losses = sum(1 for r in closed_rows if float(r["pnl"] or 0) <= 0)
+        total_pnl = float(pnl_rows["s"] or 0)
+
+        # Position-notional ROI (sum pnl / sum entry notional of full closes)
+        notional_sum = 0.0
+        for r in closed_rows:
+            n = r["notional"]
+            if n is None:
+                ae = float(r["avg_entry"] or 0)
+                q = float(r["qty"] or 0)
+                n = ae * q if ae > 0 and q > 0 else 0.0
+            notional_sum += float(n or 0)
+
+        ref = float(equity_ref) if equity_ref is not None and equity_ref > 0 else 0.0
+        total_pnl_pct = (total_pnl / ref) if ref > 0 else 0.0
+        notional_pnl_pct = (total_pnl / notional_sum) if notional_sum > 0 else 0.0
+        win_rate = (wins / closed) if closed > 0 else 0.0
+
+        return {
+            "mode": mode_s,
+            "positions_opened": int(opened),
+            "positions_closed": int(closed),
+            "wins": int(wins),
+            "losses": int(losses),
+            "win_rate": float(win_rate),
+            "total_pnl": float(total_pnl),
+            "total_pnl_pct": float(total_pnl_pct),
+            "notional_pnl_pct": float(notional_pnl_pct),
+            "equity_ref": float(ref) if ref > 0 else None,
+        }
+
     # --- Audit ---
     def audit(self, event: str, **fields: Any) -> None:
         record = {"ts": _utcnow(), "event": event, **fields}
