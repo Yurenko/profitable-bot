@@ -265,7 +265,15 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 def run_dashboard(host: str = "127.0.0.1", port: int = 8080, open_browser: bool = True) -> None:
     import uvicorn
 
+    from src.config import load_config
+    from src.logging_setup import setup_logging
+
+    try:
+        setup_logging(load_config("config.yaml").logging)
+    except Exception:
+        pass
+
     url = f"http://{host}:{port}"
     if open_browser:
         webbrowser.open(url)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level="info", log_config=None)

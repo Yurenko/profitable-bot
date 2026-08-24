@@ -529,8 +529,16 @@ async function loadAuditFull() {
     )
     .join("") || '<div class="hint">Порожньо</div>';
 
-  const logs = await api("/api/logs?limit=40");
-  $("#logConsole").textContent = (logs || []).join("\n") || "Логів немає";
+  const logs = await api("/api/logs?limit=80");
+  const consoleEl = $("#logConsole");
+  if (!consoleEl) return;
+  if (!Array.isArray(logs)) {
+    consoleEl.textContent = logs?.error
+      ? `Помилка /api/logs: ${logs.error}`
+      : "Логів немає";
+    return;
+  }
+  consoleEl.textContent = logs.join("\n") || "Логів немає";
 }
 
 function connectWs() {

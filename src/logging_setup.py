@@ -49,3 +49,43 @@ def setup_logging(cfg: dict[str, Any] | None = None) -> None:
         fh = logging.FileHandler(path, encoding="utf-8")
         fh.setFormatter(fmt)
         root.addHandler(fh)
+
+
+def resolve_log_file(cfg: dict[str, Any] | None = None, *, project_root: Path | None = None) -> Path:
+    """Absolute path to the bot log file (relative paths are from project root)."""
+    cfg = cfg or {}
+    raw = str(cfg.get("file") or "logs/bot.log")
+    path = Path(raw)
+    if not path.is_absolute():
+        root = project_root or Path(__file__).resolve().parent.parent
+        path = root / path
+    return path
+
+
+def tail_log_lines(path: Path, limit: int = 60) -> list[str]:
+    """Last `limit` lines without loading the whole file (bot.log grows for weeks)."""
+    limit = max(1, int(limit))
+    if not path.exists() or not path.is_file():
+        return []
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    if size <= 0:
+        return []
+    # Read from the end in chunks until we have enough newlines
+    block = 8192
+    data = b""
+    newlines = 0
+    with path.open("rb") as f:
+        pos = size
+        while pos > 0 and newlines <= limit:
+            read = min(block, pos)
+            pos -= read
+            f.seek(pos)
+            chunk = f.read(read)
+            data = chunk + data
+            newlines += chunk.count(b"\n")
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    return lines[-limit:]

@@ -13,7 +13,7 @@ from typing import Any
 from src.app_factory import create_bot, create_store
 from src.config import AppConfig, load_config
 from src.config_io import save_config_patch
-from src.logging_setup import setup_logging
+from src.logging_setup import resolve_log_file, setup_logging, tail_log_lines
 from src.risk_manager import RiskManager
 from src.strategy import MeanReversionDCAStrategy
 from src.runtime_env import is_vercel
@@ -573,12 +573,20 @@ class BotManager:
 
     def read_logs(self, limit: int = 60) -> list[str]:
         cfg = load_config(self.config_path)
-        log_path = cfg.logging.get("file", "logs/bot.log")
         if is_vercel():
-            # Keep only the filename, Vercel writes to /tmp/<name>.
-            log_path = "/tmp/" + Path(log_path).name
-        path = Path(log_path)
-        if not path.exists():
-            return []
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return lines[-limit:]
+            path = Path("/tmp") / Path(str(cfg.logging.get("file") or "bot.log")).name
+        else:
+            root = Path(__file__).resolve().parent.parent
+            path = resolve_log_file(cfg.logging, project_root=root)
+        try:
+            lines = tail_log_lines(path, limit=min(int(limit), 200))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("read_logs failed: %s", exc)
+            return [f"(не вдалось прочитати {path}: {exc})"]
+        if lines:
+            return lines
+        if path.exists():
+            return [f"(файл порожній: {path})"]
+        return [
+            f"(немає {path} — логи процесу дивіться: journalctl -u trading-dashboard -n 80 --no-pager)"
+        ]
